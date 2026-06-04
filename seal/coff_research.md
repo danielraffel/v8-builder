@@ -83,3 +83,68 @@ Mach-O dedup) is the proven analog. NOT pushed blind.
   approach to try there: keep `deps=[:v8_monolith]`; make the monolith's objects pulled
   WITHOUT a second file reference (e.g. `-Wl,--whole-archive` ordered before deps libs,
   or `-Wl,--start-lib/--end-lib`, or lld `-z` flags) — verify on Linux.
+
+---
+
+## ELF seal — RESOLVED (2026-06-04, on-Linux arm64 loop via QEMU+HVF)
+
+Stood up a real on-Linux iteration loop (arm64 Ubuntu 24.04 in QEMU+HVF on Apple
+Silicon; egress via a host HTTP-CONNECT proxy reverse-tunneled in; V8 15.1 synced at
+SHA 32db030896203ea8d940bfcd2b4566c7a75e91fc). Two decisive results:
+
+**1. The duplicate-symbol bug is purely link-line ORDER (synthetic repro, native
+ld.lld 18.1.3).** A static archive referenced as a PLAIN deps archive that appears
+*before* `-Wl,--whole-archive <same archive>` → `ld.lld: error: duplicate symbol`
+(the plain ref pulls a member on-demand, then --whole-archive pulls it AGAIN; lld does
+not dedup, unlike Mach-O `-force_load`). The SAME inputs with `--whole-archive <archive>`
+*before* the plain reference link **rc=0** AND the output contains every member
+(verified both a synthetic funcA and funcB present). So: order matters, and the bug is
+**monolith-vs-monolith, independent of the Rust closure** (the repro has no Rust).
+
+**2. The current `v8_sealed_shared` gn target ALREADY emits the correct (clean) order.**
+The real Chromium solink rule (from `out/.../toolchain.ninja`) is:
+```
+clang++ -shared -Wl,-soname=... ${ldflags} -o libv8.so @libv8.so.rsp ${rlibs}
+```
+and `ninja -t commands v8_sealed_shared` expands `${ldflags}` to include, in order:
+`... -Wl,--whole-archive obj/libv8_monolith.a -Wl,--no-whole-archive`. So the link line
+is: **(1)** `--whole-archive monolith` → **(2)** `@rsp` (deps incl. the plain monolith)
+→ **(3)** `${rlibs}` (Rust closure, last). `${ldflags}` precede `@rsp` in the rule, so
+the monolith is whole-archived FIRST; the plain monolith in the rsp is then a harmless
+no-op (everything already defined) → **no duplicate symbols**. This is exactly the
+clean "FIX-A" order proven in (1).
+
+**Conclusion:** the duplicate-symbol failure recorded above was an EARLIER seal-target
+shape (monolith pulled via deps BEFORE the whole-archive). The current target in
+`build-v8.py` (`SEAL_TARGET_GN`, ELF branch) is correct as written and should link
+cleanly on ELF. No gn change is required. Candidates #1–#3 above are superseded.
+
+**Optional hardening (not required, deferred):** to make the recipe robust against a
+future gn template that reorders `${ldflags}` vs `@rsp`, switch from hand-rolled
+`-Wl,--whole-archive` to Chromium's blessed `add-whole-archive` LinkWrapper
+(`build/toolchain/whole_archive.py`, driven by the per-target whole-archive config).
+Left as-is for now — don't change a recipe that's proven correct by link-line order, and
+the mac lane shares `SEAL_TARGET_GN`.
+
+## Why a FAITHFUL local Linux build was NOT completed (and what remains)
+
+The on-Linux loop proved the seal mechanism but could NOT produce the *shipping* artifact
+locally, because the host is arm64 and V8 15.1's toolchain is x86_64/clang-23-pinned:
+- **No arm64-linux Chromium clang/rust exists.** `tools/clang/scripts/update.py` maps
+  `'linux' → 'Linux_x64'` only (host choices: linux/mac/mac-arm64/win). Same for the
+  pinned Rust.
+- **qemu-user (8.2.2) segfaults** running the bundled x86_64 `clang`/`rustc` (signal 11),
+  even with the amd64 sysroot as `QEMU_LD_PREFIX` — so the version-matched toolchain
+  cannot be emulated here.
+- **System clang 18.1.3 has deep clang-23 flag skew vs V8 15.1**: it compiles V8 base
+  fine but rejects clang-23-era flags V8 emits — `-fno-lifetime-dse`, `-Wa,--crel`,
+  `-fdiagnostics-show-inlining-chain`, `-fsanitize-ignore-for-ubsan-feature` — and more
+  would surface deeper. Stripping them yields a non-faithful build anyway.
+
+So the FAITHFUL end-to-end Linux/x64 validation (bundled clang-23 + Temporal/Rust +
+bundled libc++, the real CI target) belongs on **GitHub ubuntu-24.04 (x86_64)** where the
+bundled toolchain runs natively — a single confirmation run, not an iteration loop, since
+the seal recipe is now proven correct. That run is **owner-gated** (outward-facing CI).
+The local loop remains available (system clang 18 + `v8_enable_temporal_support=false` +
+`use_sysroot=false`/`use_custom_libcxx=false`) for any future ELF seal-link iteration,
+which is all the synthetic repro needs anyway.
