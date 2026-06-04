@@ -49,6 +49,15 @@ def common_gn_args():
         'is_official_build=false',
         'is_debug=false',
         'v8_monolithic=true',
+        # The monolith is destined for a SHARED library (D5 flagship), so build it
+        # the way V8 builds its own shared/component lib: this gn arg defines
+        # V8_TLS_USED_IN_LIBRARY, which switches V8's hot-path thread_locals
+        # (g_current_isolate_, g_current_local_heap_) from the exe-only "local-exec"
+        # TLS model to the PIC-safe "local-dynamic" model + a hidden non-inline getter.
+        # Without it, linking the monolith into `-shared` fails on ELF/lld with
+        # `relocation R_X86_64_TPOFF32 ... cannot be used with -shared` (CI 26965278162).
+        # Its ONLY effect (BUILD.gn:1257) is that define — no visibility/export change.
+        'v8_monolithic_for_shared_library=true',
         'v8_use_external_startup_data=false',
         'v8_enable_i18n_support=true',          # D2: Intl ON
         'use_rtti=false',                       # match Skia -fno-rtti
