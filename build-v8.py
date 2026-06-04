@@ -129,20 +129,37 @@ def linux_gn_args(arch):
     ]
 
 
+def win_gn_args(arch):
+    return common_gn_args() + [
+        f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
+        'target_os="win"',
+        # PE/COFF: a DLL exports ONLY dllexport'd / .def / /EXPORT: symbols, so the
+        # ICU/zlib/Abseil objects inside the monolith stay internal by construction —
+        # no whole-archive symbol-hiding needed (unlike ELF/Mach-O). v8_monolith asserts
+        # !is_component_build, so the dllexport lever is v8_expose_public_symbols, which
+        # defines BUILDING_V8_SHARED → V8_EXPORT = __declspec(dllexport) for the
+        # v8::/cppgc:: surface. The seal target then /WHOLEARCHIVEs the monolith into one
+        # v8.dll (+ v8.dll.lib import lib). See seal/coff_research.md.
+        'is_component_build=false',
+        'v8_expose_public_symbols=true',
+    ]
+
+
 def platform_gn_args(platform, arch):
     if platform == "mac":
         return mac_gn_args(arch)
     if platform == "linux":
         return linux_gn_args(arch)
-    raise SystemExit(f"gn args for platform '{platform}' not implemented "
-                     "(Windows DLL seal is a separate lane — see seal/coff_research.md)")
+    if platform == "win":
+        return win_gn_args(arch)
+    raise SystemExit(f"gn args for platform '{platform}' not implemented")
 
 
 # Injected into V8's BUILD.gn. Proven on macOS (P1c); the ELF branch is the Linux
 # analog (version-script + --whole-archive), validated on CI (unprovable on macOS).
 SEAL_TARGET_GN = '''\
 # >>> v8-builder sealed-shared target (injected)
-if ((is_mac || is_linux) && v8_monolithic) {
+if ((is_mac || is_linux || is_win) && v8_monolithic) {
   v8_shared_library("v8_sealed_shared") {
     output_name = "v8"
     sources = []
@@ -162,6 +179,17 @@ if ((is_mac || is_linux) && v8_monolithic) {
         "-Wl,-exported_symbols_list," + rebase_path("v8_embedder_exports.txt", root_build_dir),
         "-Wl,-install_name,@rpath/libv8.dylib",
         "-Wl,-force_load," + rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
+      ]
+    } else if (is_win) {
+      # PE/COFF: nothing is exported unless dllexport'd, so ICU/zlib/absl stay internal
+      # by construction (v8_expose_public_symbols made V8_EXPORT=dllexport for v8::).
+      # Hiding is free; INCLUSION is not — /WHOLEARCHIVE pulls every monolith object
+      # into v8.dll (the leaf .dll has no undefined refs into the monolith otherwise).
+      # /IMPLIB names the import lib the consumer links (v8.dll.lib), which references
+      # only the exported v8:: surface → no ICU collision with Skia at link time.
+      ldflags = [
+        "/WHOLEARCHIVE:" + rebase_path("$root_build_dir/obj/v8_monolith.lib", root_build_dir),
+        "/IMPLIB:" + rebase_path("$root_out_dir/v8.dll.lib", root_build_dir),
       ]
     } else {
       # ELF: do NOT hand-roll --whole-archive on the monolith. Chromium's `solink`
@@ -234,11 +262,32 @@ class V8Build:
     # standalone-clang seal could NOT do this (it can't reconstruct the Rust closure).
     SEAL_MARKER = "# >>> v8-builder sealed-shared target (injected)"
 
+    # V8 gates BUILDING_V8_PLATFORM_SHARED (which makes v8::platform::NewDefaultPlatform
+    # export via V8_PLATFORM_EXPORT) on is_component_build only. We build the Windows DLL
+    # non-component with v8_expose_public_symbols, so widen the gate or v8::platform
+    # symbols go MISSING from v8.dll. See seal/coff_research.md (Windows lane, biggest risk).
+    _WIN_PLATFORM_GATE = ('if (is_component_build) {\n'
+                          '    defines = [ "BUILDING_V8_PLATFORM_SHARED" ]')
+    _WIN_PLATFORM_GATE_FIXED = ('if (is_component_build || v8_expose_public_symbols) {\n'
+                                '    defines = [ "BUILDING_V8_PLATFORM_SHARED" ]')
+
     def inject_seal_target(self):
         build_gn = V8_DIR / "BUILD.gn"
         text = build_gn.read_text()
         if self.SEAL_MARKER in text:
             say("seal target already injected")
+            return
+        if self.args.platform == "win":
+            # PE/COFF seal is dllexport-based: no export-list file needed. Patch the
+            # libplatform export gate so v8::platform is exported in the non-component
+            # shared build.
+            if self._WIN_PLATFORM_GATE in text:
+                text = text.replace(self._WIN_PLATFORM_GATE,
+                                    self._WIN_PLATFORM_GATE_FIXED, 1)
+                say("patched v8_libplatform export gate (non-component shared)")
+            else:
+                say("WARN: BUILDING_V8_PLATFORM_SHARED gate not found — "
+                    "v8::platform exports may be missing", Colors.WARN)
         else:
             # export lists in V8 root (Mach-O patterns + ELF version script)
             (V8_DIR / "v8_embedder_exports.txt").write_text(
@@ -246,8 +295,8 @@ class V8Build:
                            "__ZTSN2v8*", "__ZN6cppgc*", "__ZNK6cppgc*"]) + "\n")
             run([sys.executable, str(SEAL_DIR / "elf.py"), "version-script",
                  "--out", str(V8_DIR / "v8_embedder_exports.map")], env=self.env)
-            build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n")
-            say("injected v8_sealed_shared gn target")
+        build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n")
+        say("injected v8_sealed_shared gn target")
 
     def gn_gen(self, arch):
         out = V8_DIR / "out" / f"{self.args.platform}-{arch}"
@@ -258,17 +307,27 @@ class V8Build:
         run(["gn", "gen", str(out)], cwd=V8_DIR, env=self.env)
         return out
 
+    LIBNAME = {"mac": "libv8.dylib", "linux": "libv8.so", "win": "v8.dll"}
+    SEAL_BACKEND = {"mac": "macho.py", "linux": "elf.py", "win": "coff.py"}
+
     def build_sealed(self, out, arch):
         run(["ninja", "-C", str(out), "v8_sealed_shared"], cwd=V8_DIR, env=self.env)
-        libname = "libv8.dylib" if self.args.platform == "mac" else "libv8.so"
+        libname = self.LIBNAME[self.args.platform]
         lib = out / libname
         if not lib.exists():
             raise SystemExit(f"expected sealed {lib} not produced")
         dest = BUILD_DIR / f"{self.args.platform}-{arch}" / "lib"
         dest.mkdir(parents=True, exist_ok=True)
-        run(["cp", str(lib), str(dest / libname)])
+        shutil.copy2(lib, dest / libname)
+        if self.args.platform == "win":
+            # ship the import lib the consumer links against (v8.dll.lib)
+            implib = out / "v8.dll.lib"
+            if implib.exists():
+                shutil.copy2(implib, dest / "v8.dll.lib")
+            else:
+                raise SystemExit(f"expected import lib {implib} not produced")
         # audit: assert 0 absl/icu/zlib internals exported
-        backend = SEAL_DIR / ("macho.py" if self.args.platform == "mac" else "elf.py")
+        backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
         run([sys.executable, str(backend), "audit", "--lib", str(dest / libname),
              "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
         return dest / libname
@@ -300,10 +359,10 @@ class V8Build:
     def package(self, sealed, arch):
         dest = BUILD_DIR / f"{self.args.platform}-{arch}"
         inc = dest / "include"
-        inc.mkdir(parents=True, exist_ok=True)
-        # V8 public headers
-        run(["rsync", "-a", "--delete",
-             str(V8_DIR / "include") + "/", str(inc) + "/"])
+        # V8 public headers (shutil, not rsync — rsync isn't on Windows runners)
+        if inc.exists():
+            shutil.rmtree(inc)
+        shutil.copytree(V8_DIR / "include", inc)
         manifest = {
             "v8_version": self.tag,
             "platform": self.args.platform,
@@ -319,12 +378,10 @@ class V8Build:
         say(f"packaged {dest}")
 
     def run_all(self):
-        # mac is proven (P1d). linux is implemented and validates on a Linux CI runner
-        # (unprovable on a macOS host). Windows DLL seal is a separate lane (coff).
-        if self.args.platform == "win":
-            raise SystemExit("Windows DLL-export seal is a separate lane — see "
-                             "seal/coff_research.md; not wired into build-v8.py yet.")
-        default_arch = {"mac": "arm64", "linux": "x64"}[self.args.platform]
+        # mac is proven (P1d). linux validates on a Linux CI runner; the Windows DLL lane
+        # (dllexport seal + /WHOLEARCHIVE) validates on a Windows runner — both unprovable
+        # on a macOS host. Do not report a lane validated until its OS workflow runs green.
+        default_arch = {"mac": "arm64", "linux": "x64", "win": "x64"}[self.args.platform]
         archs = (self.args.archs or default_arch).split(",")
         self.setup_depot_tools()
         self.fetch_v8()
