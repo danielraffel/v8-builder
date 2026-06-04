@@ -128,13 +128,19 @@ if ((is_mac || is_linux) && v8_monolithic) {
         "-Wl,-force_load," + rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
       ]
     } else {
+      # ELF: do NOT hand-roll --whole-archive on the monolith. Chromium's `solink`
+      # rule (build/toolchain/gcc_toolchain.gni) ALREADY wraps {{inputs}} in
+      # `-Wl,--whole-archive {{inputs}} -Wl,--no-whole-archive` on Linux (the non-aix,
+      # non-mipsel branch). Since `deps=[:v8_monolith]` puts libv8_monolith.a in
+      # {{inputs}}, the rule whole-archives it ONCE, in place — and appends the Rust
+      # closure as {{rlibs}} after. A second hand-rolled --whole-archive of the same
+      # archive makes lld include every member TWICE (it does not dedup) → the
+      # duplicate-symbol failure seen in CI run 26961155381. So: just deps + the
+      # version-script. (Mach-O differs: ld64 needs explicit -force_load and dedups.)
       inputs = [ "v8_embedder_exports.map" ]
       ldflags = [
         "-Wl,--version-script=" + rebase_path("v8_embedder_exports.map", root_build_dir),
         "-Wl,-soname,libv8.so",
-        "-Wl,--whole-archive",
-        rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
-        "-Wl,--no-whole-archive",
       ]
     }
   }
