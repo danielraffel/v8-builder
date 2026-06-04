@@ -1,0 +1,11 @@
+{
+  "source": "chromium-lkgr-deps",
+  "skia": "4fdb859c8da740f1c1d94183637ff0c175329bc2",
+  "v8": "535361f082f89df6b3ceecea73b3ba7503bc83ef",
+  "dawn": "075626b4b324101b06cd309c4140672588a5adf2",
+  "repos": {
+    "skia": "https://skia.googlesource.com/skia.git",
+    "v8": "https://chromium.googlesource.com/v8/v8.git",
+    "dawn": "https://dawn.googlesource.com/dawn.git"
+  }
+}
