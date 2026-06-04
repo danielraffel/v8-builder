@@ -155,6 +155,13 @@ def win_gn_args(arch):
         # v8.dll (+ v8.dll.lib import lib). See seal/coff_research.md.
         'is_component_build=false',
         'v8_expose_public_symbols=true',
+        # Same consumable-ABI reasoning as Linux: V8's public API exposes std types, and
+        # the bundled libc++ mangles them with Chromium's __Cr ABI namespace. The standard
+        # Windows C++ ABI is the MSVC STL, so build against it so a normal MSVC/clang-cl
+        # consumer (incl. the coexistence validator) links without an ABI mismatch. No
+        # use_sysroot toggle needed on Windows (Win SDK + modern MSVC STL used directly).
+        'use_custom_libcxx=false',
+        'use_custom_libcxx_for_host=false',
     ]
 
 
