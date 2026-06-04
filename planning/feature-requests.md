@@ -52,6 +52,18 @@ LKGR set** (same skia/v8/dawn SHAs) before pairing — a machine-checkable co-te
 guarantee, not a naming convention. (This is the cross-repo "shared contract" from
 proposal §3, extended to carry the LKGR triple.)
 
+**Alignment is two-dimensional (the core requirement):**
+1. **Cross-repo** — skia-builder release ⟷ v8-builder release reference the same set.
+2. **Intra-repo (within v8-builder)** — *every* per-platform/arch artifact in a single
+   v8-builder release (mac-arm64, mac-x86_64, linux-x64, win-x64, …) must be built from
+   the **same** V8 SHA / LKGR set and carry it in its manifest. The `validate-all`
+   release gate asserts all artifacts agree (no mixed-revision release), so a "pair" is
+   coherent no matter which arch Pulp pulls. Same discipline on the skia-builder fork.
+
+Net: a Pulp "pair" = (one skia-builder release + one v8-builder release) where ALL
+artifacts on both sides carry an identical LKGR triple. Offer/verify that alignment, or
+the word "pair" is meaningless.
+
 **Dependency it creates:** keeping skia-builder fork + v8-builder regenerating
 regularly and in sync against LKGR — which motivates FR2.
 
