@@ -81,12 +81,14 @@ jobs:
         if: steps.sel.outputs.go == 'true'
         shell: bash
         run: |
-          # locate the dir holding Skia's static archives in the unzipped release
-          SKIA_LIBDIR="$(dirname "$(find skia -name 'libskunicode_icu.a' -o -name 'skunicode_icu.lib' | head -1)")"
+          # locate the dir holding Skia's static archives in the unzipped release.
+          # ABSOLUTE path: cmake treats a RELATIVE foo/lib.a in target_link_libraries as a
+          # library NAME and emits `-lfoo/lib.a` (ld can't find it). Resolve to absolute.
+          SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' -o -name 'skunicode_icu.lib' | head -1)")" && pwd)"
           echo "SKIA_LIBDIR=$SKIA_LIBDIR"
           cmake -S validate -B validate/build \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
-            -DV8_LIBRARY_PATH="$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
+            -DV8_LIBRARY_PATH="$PWD/$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
             -DSKIA_DIR="$SKIA_LIBDIR" \
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build

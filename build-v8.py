@@ -92,13 +92,23 @@ def linux_gn_args(arch):
     return common_gn_args() + [
         f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
         'target_os="linux"',
-        # D2b RESOLVED (CI finding 2026-06-04): do NOT force use_custom_libcxx=false
-        # on Linux — Chromium's bundled debian-bullseye sysroot libstdc++ is too old
-        # for C++20 (no std::bit_cast / <source_location>) and V8 fails to compile.
-        # In the sealed-SHARED model V8 shares no C++ types with Skia (serialized
-        # boundary) and its libc++ is hidden by the seal, so V8 uses its OWN bundled
-        # libc++ (the default) — exactly like it bundles its own absl/icu. Skia keeps
-        # libstdc++; the two coexist because nothing STL crosses the boundary.
+        # D2b REVISED (2026-06-04): build with the PLATFORM C++ ABI (system libstdc++),
+        # NOT Chromium's bundled libc++. V8's public API exposes std types
+        # (e.g. v8::platform::NewDefaultPlatform(..., std::unique_ptr<...>, ...)); the
+        # bundled libc++ mangles std:: with Chromium's `__Cr` ABI namespace
+        # (_LIBCPP_ABI_NAMESPACE=__Cr), so a consumer built with system libstdc++ gets
+        # undefined-reference at link (verified on a real x86_64 link). That makes the
+        # .so non-drop-in. Node ships libnode against the system libstdc++ (RHEL-8
+        # baseline, glibc>=2.28) for exactly this reason — Node-API is the C ABI; the
+        # direct C++ API uses the platform ABI. So: use the HOST's modern toolchain
+        # (use_sysroot=false fixes the old-bullseye-sysroot C++20 gap that drove D2b's
+        # earlier bundled-libc++ choice) with standard libstdc++. The export SEAL is
+        # unchanged (ICU/zlib/Abseil stay internal). Release portability (old-glibc
+        # floor) wants a RHEL/Rocky-8 build image — tracked as a follow-up; ubuntu-24.04
+        # CI is fine to validate the ABI is consumable.
+        'use_sysroot=false',
+        'use_custom_libcxx=false',
+        'use_custom_libcxx_for_host=false',
     ]
 
 
