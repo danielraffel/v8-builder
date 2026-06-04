@@ -1,0 +1,33 @@
+# validate-v8.yml — re-validate a published V8 release against a Skia release,
+# independent of the build. Runs the identity-anchored harness on ALL THREE OSes
+# (proposal §8) so "validated" means "a Pulp-linked binary runs on each target".
+# STATUS: SKELETON — activates once validate/ is wired (Phase 1+).
+name: Validate V8
+on:
+  workflow_dispatch:
+    inputs:
+      v8_release_tag:
+        description: 'v8-builder release tag (e.g. m149-v8-13.6.233.8)'
+        required: true
+        type: string
+      skia_release_tag:
+        description: 'Matching skia-builder release tag (e.g. chrome/m149)'
+        required: true
+        type: string
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2022]   # pinned, run on all three
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate (SKELETON)
+        shell: bash
+        run: |
+          echo "Phase 1+: download v8 ${{ inputs.v8_release_tag }} + skia ${{ inputs.skia_release_tag }}"
+          echo "verify SHA256 + provenance; symbol audit; forced-collision link; identity harness"
+          echo "archive logs + symbol audit + exe SHA256 + capture PNG"
+          exit 2

@@ -34,7 +34,7 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| P0.1 | Scaffold local repo (files, skeletons) | TODO | public push deferred until explicit go |
+| P0.1 | Scaffold local repo (files, skeletons) | DONE | 18 files; build-v8.py CLI parses; stages exit 2 (honest skeleton) |
 | P0.2 | Harden Pulp capture test → identity-anchored gate | TODO | engine + GPU-backend identity, no skip-pass |
 | P0.3a | Positive control: harness PASSES against libnode | TODO | |
 | P0.3b | Negative control A: unsealed V8 → link FAILS (dup ICU) | TODO | |

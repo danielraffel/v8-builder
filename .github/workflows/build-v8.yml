@@ -1,0 +1,79 @@
+# build-v8.yml — build, seal, validate, and release V8 per platform/arch.
+# STATUS: SKELETON. build-v8.py is not implemented yet, so real runs will fail by
+# design until the per-phase logic lands. Structure incorporates the review
+# corrections (proposal §7): EXACT platform parsing (not substring), pinned runner
+# images, a validate-all aggregation job that GATES the release, dynamic assets.
+name: Build V8
+run-name: Build V8 (${{ inputs.v8_version || 'default milestone' }})
+on:
+  workflow_dispatch:
+    inputs:
+      v8_version:
+        description: 'V8 milestone or exact version (e.g. m149 or 13.6.233.8)'
+        required: false
+        type: string
+      platforms:
+        description: 'Comma-separated exact platform/arch ids, or "all"'
+        required: false
+        default: 'all'
+        type: string
+      skip_release:
+        description: 'Skip creating a release'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}-${{ inputs.platforms }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-v8:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15,      platform: mac,   arch: arm64 }
+          - { os: macos-15,      platform: mac,   arch: x86_64 }
+          - { os: macos-15,      platform: mac,   arch: universal }
+          - { os: ubuntu-24.04,  platform: linux, arch: x64 }
+          - { os: windows-2022,  platform: win,   arch: x64 }
+          # later: ubuntu-24.04-arm / windows-11-arm (pinned, not *-latest)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Select (exact, not substring)
+        id: sel
+        shell: bash
+        run: |
+          P="${{ inputs.platforms }}"
+          ID="${{ matrix.platform }}/${{ matrix.arch }}"
+          if [ "$P" = "all" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else
+            IFS=','; for x in $P; do [ "$x" = "$ID" ] && echo "go=true" >> "$GITHUB_OUTPUT"; done
+          fi
+      - if: steps.sel.outputs.go == 'true'
+        uses: actions/checkout@v6
+      - if: steps.sel.outputs.go == 'true'
+        name: Build + seal + validate (SKELETON)
+        shell: bash
+        run: |
+          echo "Phase-N: python3 build-v8.py ${{ matrix.platform }} -archs ${{ matrix.arch }} -tag '${{ inputs.v8_version }}'"
+          echo "then seal/, then validate/ (download provenance-verified Skia, forced-collision link, identity harness)"
+          exit 2  # skeleton
+
+  # Release is GATED on this aggregation (proposal §7) — not on platforms == 'all'.
+  validate-all:
+    needs: build-v8
+    if: ${{ !inputs.skip_release }}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Phase 4: assert every requested target produced a VALIDATED artifact before release."
+
+  create-release:
+    needs: validate-all
+    if: ${{ !inputs.skip_release }}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Phase 4: tag mNNN-v8-<version>; attach dynamically-listed validated assets + manifest + pair lockfile."

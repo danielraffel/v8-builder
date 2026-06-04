@@ -1,0 +1,21 @@
+{
+  "_comment": "Symbol-sealing policy. For the SHARED flagship the seal is an export-table policy applied at link time (only these symbols leave the library); ICU/zlib/etc. stay internal. See planning/v8-builder-proposal.md §6/§6b. D7 = general audience, so the keep set is V8's full public ABI, NOT a Pulp-narrowed scrape.",
+  "export_keep_prefixes": [
+    "v8::",
+    "v8::platform::",
+    "cppgc::",
+    "_ZN2v8",
+    "_ZN6cppgc"
+  ],
+  "deny_export_prefixes": [
+    "u_", "ubrk_", "ucnv_", "uloc_", "udat_", "ucol_", "unorm", "uset_", "utext_", "uregex_",
+    "icu_", "U_ICU",
+    "inflate", "deflate", "zlib", "crc32", "adler32", "compress", "uncompress",
+    "_ZN6icu_"
+  ],
+  "audit": {
+    "must_be_zero_global": ["ubrk_", "ucnv_", "uloc_", "u_", "inflate", "deflate"],
+    "must_be_present": ["v8::V8::Initialize", "v8::Isolate::New"],
+    "pulp_completeness_check": "scrape undefined v8::/cppgc:: from Pulp's js_v8_engine.cpp + choc wrapper; the export set MUST be a superset (completeness check only, never a narrowing)"
+  }
+}
