@@ -222,7 +222,14 @@ def say(msg, c=Colors.OK):
 
 def run(cmd, cwd=None, env=None):
     say("$ " + (" ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)), Colors.WARN)
-    subprocess.run(cmd, cwd=cwd, env=env, check=True)
+    if os.name == "nt" and isinstance(cmd, list):
+        # depot_tools ships fetch/gclient/gn as .bat; Windows CreateProcess won't
+        # resolve a bare name to its .bat (PATHEXT is a shell feature). Run through the
+        # shell so cmd.exe resolves it against PATH (which includes depot_tools).
+        subprocess.run(subprocess.list2cmdline([str(c) for c in cmd]),
+                       cwd=cwd, env=env, check=True, shell=True)
+    else:
+        subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
 class V8Build:
@@ -232,6 +239,10 @@ class V8Build:
         self.env = dict(os.environ)
         self.env["PATH"] = f"{DEPOT_TOOLS_PATH}{os.pathsep}{self.env.get('PATH','')}"
         self.env["DEPOT_TOOLS_UPDATE"] = "1"
+        if os.name == "nt":
+            # Use the runner's local Visual Studio + Windows SDK, not Google's internal
+            # win toolchain (which external builders can't fetch). windows-2022 has VS2022.
+            self.env["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
 
     def setup_depot_tools(self):
         if not DEPOT_TOOLS_PATH.exists():
