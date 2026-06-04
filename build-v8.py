@@ -42,6 +42,7 @@ def common_gn_args():
     return [
         'is_official_build=true',
         'is_debug=false',
+        'chrome_pgo_phase=0',                   # embedder build: no PGO (avoids profile fetch)
         'v8_monolithic=true',
         'v8_use_external_startup_data=false',
         'v8_enable_i18n_support=true',          # D2: Intl ON
@@ -159,7 +160,10 @@ class V8Build:
         archs = (self.args.archs or "arm64").split(",")
         self.setup_depot_tools()
         self.fetch_v8()
-        self.sync_v8()
+        if not self.args.use_synced:
+            self.sync_v8()
+        else:
+            say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
         for arch in archs:
             out = self.gn_gen(arch)
             monolith = self.ninja(out)
@@ -174,6 +178,8 @@ def main():
     p.add_argument("-archs", help="Comma-separated archs (e.g. arm64,x86_64 / x64)")
     p.add_argument("-tag", dest="v8_version", help=f"V8 version tag (default {DEFAULT_V8_TAG})")
     p.add_argument("--no-seal", action="store_true", help="Skip sealing (debug only)")
+    p.add_argument("--use-synced", action="store_true",
+                   help="Build the currently-synced checkout instead of syncing to -tag")
     p.add_argument("--fetch-only", action="store_true", help="Only setup depot_tools + fetch/sync V8")
     args = p.parse_args()
     b = V8Build(args)
