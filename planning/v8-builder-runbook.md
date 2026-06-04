@@ -13,7 +13,7 @@
 |------|:----:|:----:|:----:|---|
 | macOS arm64 | ✅ | ✅ | ✅ | **DONE** — full Pulp threejs demo, identity gate PASS, real GPU |
 | macOS x86_64 | ✅ | ✅ | ✅ | **DONE** — sealed dylib + standalone validator PASS under Rosetta (universal = lipo) |
-| Linux x64 | ✅ compiles | ❌ **seal fails** | ⚪ | **CI run 26961155381 FAILED at seal link** — faithful build (V8 15.1.27, Temporal/Rust ON) reproduced the `ld.lld` duplicate-symbol bug (monolith pulled twice). Seal target NEEDS a fix (the Temporal-OFF "clean" result didn't hold). #1 open. |
+| Linux x64 | ✅ compiles | 🔧 **fix staged** | ⚪ | CI run 26961155381 reproduced `ld.lld` duplicate-symbol. **Root cause = DOUBLE whole-archive** (solink rule already whole-archives `{{inputs}}`; hand-rolled `--whole-archive` was a 2nd copy). **Fix committed on branch `linux-seal-fix`** (drop the hand-rolled flags); CI 26965278162 validating. See planning/HANDOFF.md. |
 | Linux arm64 | ⚪ | n/a | ⚪ | **OPEN** — cross-compile from x64 (or native on Tart arm64 VM) + validate on arm64 runner |
 | Windows x64 | ⚪ | ⚪ | ⚪ | **OPEN** — DLL export-table seal lane NOT yet implemented in build-v8.py (it `SystemExit`s) |
 | Windows arm64 | ⚪ | ⚪ | ⚪ | **OPEN** — after the Windows x64 lane exists |
@@ -25,13 +25,14 @@
 - macOS arm64 + x86_64 sealed shared V8 15.1 coexists with Skia Graphite + Dawn (P1d, P2.1).
 - Linux: V8 **compiles** on x86_64 CI; the ELF dup-symbol bug is understood (link-line ORDER — synthetic ld.lld 18 repro). BUT the **faithful Temporal-ON build still fails the seal link** (CI run 26961155381) — the Temporal-OFF "clean" result did NOT generalize. **The seal target still needs a fix.** See `seal/coff_research.md` top "CORRECTION (2026-06-04)".
 
-### #1 OPEN — Linux ELF seal fix (faithfully reproduced)
-The `v8_sealed_shared` ELF target links the monolith twice (deps plain copy + hand-rolled
-`--whole-archive`); with the Rust/Temporal closure ON, lld pulls a member from both → duplicate
-symbols. Fix: reference the monolith **exactly once**, whole-archived, while still pulling the
-Rust closure — lead = Chromium's `-LinkWrapper,add-whole-archive` (`build/toolchain/whole_archive.py`)
-instead of hand-rolled ldflags. **Reproduces on GitHub CI (~1h/iter) and would reproduce on a
-Tart x86_64 Linux VM (Mac Studio) for a fast local loop.** This gates the whole Linux lane.
+### #1 OPEN — Linux ELF seal fix (root cause found; fix staged on branch `linux-seal-fix`)
+**Root cause:** the Chromium `solink` rule already wraps `{{inputs}}` in `-Wl,--whole-archive …
+--no-whole-archive` on Linux; `deps=[:v8_monolith]` puts the monolith in `{{inputs}}`, so it's
+whole-archived once by the rule. The injected target's **hand-rolled** `--whole-archive
+obj/libv8_monolith.a` whole-archived the same archive a SECOND time → lld duplicated every member.
+**Fix (committed on branch `linux-seal-fix`):** drop the hand-rolled whole-archive ldflags from the
+ELF branch; rely on `deps` + the rule (Rust closure still appended as `{{rlibs}}`). **Confirm via
+CI 26965278162 or a local x86_64 Linux VM, then merge to main.** See planning/HANDOFF.md.
 
 ### Hard toolchain constraint to carry forward (the crux for ARM/emulation)
 V8 15.1's bundled **clang (llvmorg-23) + Rust are x86_64-Linux-host ONLY** (`tools/clang/scripts/update.py`: `'linux'→'Linux_x64'`). Consequences:
