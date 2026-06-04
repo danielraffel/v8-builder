@@ -109,6 +109,11 @@ def linux_gn_args(arch):
         'use_sysroot=false',
         'use_custom_libcxx=false',
         'use_custom_libcxx_for_host=false',
+        # use_sysroot=false makes gn resolve system libs via pkg-config; V8 standalone
+        # does NOT need glib (it's a Chromium-UI default), so turn it off rather than
+        # require libglib2.0-dev on the build host. V8 monolith otherwise needs only
+        # libc/libstdc++/libm, present on any modern Linux.
+        'use_glib=false',
     ]
 
 
