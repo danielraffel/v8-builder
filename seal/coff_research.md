@@ -67,3 +67,19 @@ whole-archive already provided. Fix likely = whole-archive the monolith BEFORE t
 deps libs, or dep only on the Rust targets (not the monolith) + whole-archive the
 monolith. Both need an on-Linux gn iteration loop to verify. macOS (force_load+deps,
 Mach-O dedup) is the proven analog. NOT pushed blind.
+
+
+## Key constraint (confirmed on mac 2026-06-04): ELF fix is NOT iterable on macOS
+- The duplicate-symbol failure is **Mach-O vs ELF specific**: ld64 *dedups* identical
+  archive members (so codex's `deps=[:v8_monolith]` + `-force_load` works on mac);
+  lld does **not** dedup under `--whole-archive` (so the same recipe duplicates on ELF).
+  => I cannot reproduce — let alone validate — the ELF fix on this Mac.
+- Tested swapping `deps=[:v8_monolith]` → `deps=[//:v8_maybe_temporal]` (Rust closure
+  only, monolith via force_load): got the full ~56-rlib Rust closure on the line, but
+  **undefined symbols** — proving `deps=[:v8_monolith]` is REQUIRED for the complete
+  C++ closure (it brings non-Rust deps the monolith .a references). So candidate #1
+  must KEEP `deps=[:v8_monolith]` and fix the double-link some other way.
+- Net: the ELF seal fix genuinely needs an **on-Linux gn/lld iteration loop**. Lead
+  approach to try there: keep `deps=[:v8_monolith]`; make the monolith's objects pulled
+  WITHOUT a second file reference (e.g. `-Wl,--whole-archive` ordered before deps libs,
+  or `-Wl,--start-lib/--end-lib`, or lld `-z` flags) — verify on Linux.
