@@ -130,9 +130,22 @@ def linux_gn_args(arch):
 
 
 def win_gn_args(arch):
-    return common_gn_args() + [
+    # D3 (pointer compression OFF) exists only to match Homebrew libnode's ABI — which is
+    # a mac/linux baseline; there is NO libnode on Windows. V8's non-default
+    # non-pointer-compressed Windows matrix is undercovered upstream and MISCOMPILES:
+    # JSAtomicsMutex/Condition use an 8-byte ExternalPointerMember (sandbox+compression
+    # off) and MSVC's class layout pads the packed V8_OBJECT base 4 bytes past what Torque
+    # models, tripping `static_assert(kOwnerThreadIdOffset == offsetof(...))` (CI run
+    # 26973680886). Rather than an invasive, version-fragile Torque/struct patch, use V8's
+    # SUPPORTED default on Windows: pointer compression ON. The Windows Pulp/choc V8
+    # consumer must match (compile with V8_COMPRESS_POINTERS) — there's no libnode to
+    # constrain it. So Windows v8.dll has compression ON; mac/linux stay OFF (D3).
+    base = [a for a in common_gn_args()
+            if not a.startswith("v8_enable_pointer_compression")]
+    return base + [
         f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
         'target_os="win"',
+        'v8_enable_pointer_compression=true',   # Windows-only (see note above)
         # PE/COFF: a DLL exports ONLY dllexport'd / .def / /EXPORT: symbols, so the
         # ICU/zlib/Abseil objects inside the monolith stay internal by construction —
         # no whole-archive symbol-hiding needed (unlike ELF/Mach-O). v8_monolith asserts
