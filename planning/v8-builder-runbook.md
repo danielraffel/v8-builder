@@ -54,7 +54,8 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P2.2 | macOS A/B: ours vs Homebrew libnode through Pulp | TODO | identity proves the swap is real |
 | P2.3 | Flip Pulp default off libnode (D4) | TODO | only after A/B green |
 | P3.1 | Windows DLL (export-table seal) | BLOCKED | Windows runner required. Gated on CI/public-repo go. |
-| P4.1 | CI: build-v8.yml + validate-v8.yml | READY | build-v8.yml now invokes the real build-v8.py + forced-collision validator per OS (exact platform parsing, pinned runners). Needs repo pushed to run. Gated on PUB go. |
+| PUB | Public repo | DONE ✅ | github.com/danielraffel/v8-builder (public, clean: no iPlug, no binaries). |
+| P4.1 | CI: build-v8.yml (GitHub-hosted) | PARTIAL | build-v8.yml is a real pipeline (build-v8.py mac proven + linux lane; win=separate). **Gating item before a meaningful CI run: validate/identity_main.cpp is still a skeleton** — needs the real standalone forced-collision V8+Skia validator (the pulp-demo gate proved mac; CI/linux/win need this OS-agnostic one). |
 | P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
 | PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
 
