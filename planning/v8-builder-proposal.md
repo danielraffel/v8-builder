@@ -709,8 +709,20 @@ worktree. Two concrete findings that change the plan:
      cannot interpose Dawn's.
    - Consequence for the rig: the libnode "positive control" can't be a clean green
      (libnode+Dawn genuinely crashes). The **harness behaved correctly — it refused
-     to fake-pass** and surfaced a real abort. The true positive control becomes our
-     own sealed shared lib; until then, this collision IS the demonstration.
+     to fake-pass** and surfaced a real abort.
+
+3. **APPROACH VERIFIED (2026-06-03).** Hiding `absl` from the linked binary's export
+   table (`-Wl,-unexported_symbols_list` on the exe — the consumer-side equivalent of
+   what a from-source **shared V8 exporting only `v8::`/`cppgc::`** does by
+   construction) **eliminates the abort**: the real Three.js cube renders
+   (1640×1120 PNG) with **V8 14.6.202.33-node.19 + Metal/Dawn/Skia Graphite coexisting
+   in one binary**, and the identity-anchored gate **PASSES** (engine + version +
+   hardware-GPU asserted). Negative controls confirm honesty: unsealed (688 absl
+   exports) → abort; wrong version → gate FAIL. **This empirically proves the D5
+   export-table sealing approach resolves V8↔Skia/Dawn coexistence** — the remaining
+   work is producing that sealed shared lib *from source* so we don't depend on
+   libnode + a consumer link flag. The collision class (absl/ICU/zlib) and its fix
+   (export only the V8 ABI) are now demonstrated end-to-end, not hypothesized.
 
 ## 13. Review log
 
