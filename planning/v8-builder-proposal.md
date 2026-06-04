@@ -489,12 +489,18 @@ We want the same "pin a human-meaningful tag and trust it" ergonomics skia-build
 gives via `chrome/m149` — but for V8, and aligned so Pulp can pair the two with
 confidence.
 
-**The pairing insight.** V8 and Skia each bundle their own ICU/zlib. If we build V8
-from the **same Chromium milestone** that the Skia we ship was cut from, their
-bundled ICU/zlib are the *same vintage* — which reduces (does not eliminate) the
-data/version skew the whole proposal is fighting, and makes the pairing legible:
-**Skia `chrome/m149` ↔ V8 from M149.** So the V8 version we pick is not arbitrary;
-it's driven by the Skia branch Pulp uses.
+**The pairing reality (corrected after P1d).** There is **no upstream-blessed Skia+V8
+match here, and we don't need one.** V8 and Skia/Dawn share **no C++ types** (they talk
+via serialized `choc::value`) and each bundles its **own sealed** ICU/zlib/Abseil — so
+coexistence depends on the ABI boundary (libc++/STL, RTTI, pointer compression) + the
+seal, **not** on version matching. Empirically: we shipped **V8 15.1.0** against Skia
+**`chrome/m149`** (≠ the same Chromium revision — Chrome 149's V8 was ~13/14.x) and they
+coexist cleanly. So a release records a **validated pair** (exact V8 build + the exact
+Skia release it was tested against, SHA-pinned in the manifest) — a *proof of
+coexistence*, not a milestone-match claim. A truly co-tested pair would require building
+**both** Skia and V8 from the *same Chromium DEPS revision* — a possible future option,
+not what skia-builder/v8-builder do today. The tag stays human-meaningful but the
+manifest's validated-pair fields are the truth (D8/D9).
 
 **Tag scheme (proposed).** V8 has no `mNNN` branch names; it uses version numbers
 (e.g. `13.x.y.z`) and git tags, while Chromium milestones (`M149`) map to a V8

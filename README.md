@@ -41,7 +41,17 @@ planning/              # proposal + runbook (authoritative)
 
 Through Pulp's existing provider contract (`core/view/CMakeLists.txt`):
 `-DPULP_JS_ENGINE=v8 -DV8_INCLUDE_DIR=… -DV8_LIB_DIR=… -DV8_LIBRARY_PATH=…`.
-Releases are tagged `mNNN-v8-<version>` and pinned alongside a matching Skia release.
+
+**On Skia/V8 "matching":** there is no upstream-blessed Skia+V8 version pair here.
+V8 and Skia/Dawn don't share C++ types — they talk via serialized `choc::value`, and
+each bundles its **own sealed** ICU/zlib/Abseil. So coexistence depends on ABI compat
+at the link boundary (libc++/STL, RTTI, **pointer compression**) + the symbol seal —
+**not** on version matching. (Empirically: V8 15.1 coexists fine with Skia `chrome/m149`,
+which are *different* Chromium revisions.) Releases therefore record a **validated
+pair** — the exact V8 build + the exact Skia release it was tested against (SHA-pinned
+in the manifest) — which is a *proof of coexistence*, not a claim of an upstream match.
+The only way to get a truly co-tested pair would be to build both Skia and V8 from the
+**same Chromium DEPS revision** (a possible future option; not what we do today).
 
 ## License
 
