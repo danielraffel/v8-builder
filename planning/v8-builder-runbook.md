@@ -59,6 +59,7 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P4.1 | CI: build-v8.yml (GitHub-hosted) | READY* | real pipeline (build-v8.py mac proven + linux lane + standalone validator). *Minor CI-tuning expected on first run (SKIA_DIR subpath, Linux STL/ABI, Dawn frameworks). win=separate DLL lane. |
 | P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
 | SKIA-M150 | Migrate Pulp m149→m150 (AFTER V8 integration lands+merges) | PLANNED | user 2026-06-04: land V8 integration FIRST; then bump Skia to m150, rebuild pulp, fix breakage (SkRegion::setRects→SkSpan; SkStrikeRef in TextShaper), push followup, verify libs. THEN continue sweeps + iOS/Android. |
+| DEPS-PAIR | Investigate co-built Skia+V8 from one Chromium DEPS revision | PLANNED | user 2026-06-04: evidence-gather building BOTH from the same Chromium DEPS rev → truly co-tested pair (one shared absl/icu/zlib/Dawn), may even remove the dual-Abseil seal need. Future option; sequence after desktop lanes + m150. (task #21) |
 | P5 | iOS (jitless) | PLANNED | after m150 verified |
 | P6 | Android (NDK) | PLANNED | after iOS |
 | PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
