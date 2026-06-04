@@ -366,6 +366,47 @@ prove one of:** (1) our `v8_monolith` already contains all required
 *combined* static lib that preserves the single-path contract; or (3) we extend the
 provider contract to accept a `V8_LIBRARIES` list. Decide before building Linux.
 
+## 9b. Versioning & release tags (the `m149`-equivalent)
+
+We want the same "pin a human-meaningful tag and trust it" ergonomics skia-builder
+gives via `chrome/m149` — but for V8, and aligned so Pulp can pair the two with
+confidence.
+
+**The pairing insight.** V8 and Skia each bundle their own ICU/zlib. If we build V8
+from the **same Chromium milestone** that the Skia we ship was cut from, their
+bundled ICU/zlib are the *same vintage* — which reduces (does not eliminate) the
+data/version skew the whole proposal is fighting, and makes the pairing legible:
+**Skia `chrome/m149` ↔ V8 from M149.** So the V8 version we pick is not arbitrary;
+it's driven by the Skia branch Pulp uses.
+
+**Tag scheme (proposed).** V8 has no `mNNN` branch names; it uses version numbers
+(e.g. `13.x.y.z`) and git tags, while Chromium milestones (`M149`) map to a V8
+version via chromiumdash. So a v8-builder release tag should encode **both** for
+traceability:
+
+```
+release tag:  m149-v8-13.6.233.8
+              ^^^^                 Chromium milestone (matches the Skia branch Pulp pairs with)
+                   ^^^^^^^^^^^^^^  exact upstream V8 version we built (reproducible)
+```
+(Example version string only — the real M149↔V8 mapping is resolved at build time.)
+
+- `build-v8.yml` input `v8_version` accepts either a milestone (`m149`, resolved to
+  the canonical V8 version via a pinned chromiumdash lookup recorded in the repo) or
+  an exact V8 tag. Default = the milestone matching skia-builder's current default.
+- Release body links the **upstream V8 release notes** (v8.dev / chromiumdash entry
+  for that milestone) the way skia-builder links Skia's `RELEASE_NOTES.md`.
+- `manifest.json` records: Chromium milestone, exact V8 version + git commit, the
+  **exact Skia release tag the artifact was validated against**, and the resolved
+  ICU version on both sides. "Validated against `chrome/m149`" is a first-class
+  field, so Pulp knows which Skia this V8 is *proven* to coexist with.
+
+**Pulp consumption.** Pulp pins a single v8-builder release tag (e.g.
+`m149-v8-13.6.233.8`) in its dependency fetch, exactly as it pins `chrome/m149` for
+Skia. Bumping V8 is then a one-line tag change, and the build is only publishable if
+it passed validation against the paired Skia — so the pin carries a proof, not just
+a version. *(Decision D8 below: lock the exact tag string format.)*
+
 ## 10. Decisions to settle (flag for Oli / review)
 
 - **D1 — V8 version pin.** Match the V8 inside the `libnode` we use today
@@ -394,6 +435,11 @@ provider contract to accept a `V8_LIBRARIES` list. Decide before building Linux.
   OS/arch (Apple-silicon Linux VM? Windows-capable?) so we know which validation
   targets it can host vs. which must stay on stock GitHub runners. Validation runs
   on **both** before a platform is declared validated.
+- **D8 — Exact release-tag format & milestone source of truth.** Lock the tag
+  string (proposed `mNNN-v8-<version>`), and decide where the canonical
+  `mNNN → V8 version` mapping lives (pinned chromiumdash lookup committed to the
+  repo vs. resolved live at build time). Must stay parseable by Pulp's dependency
+  pin and aligned with the Skia branch Pulp uses.
 - **D7 — Artifact audience: Pulp-specific vs general embedder.** Seal aggressively
   to a Pulp-scraped keep-list (smallest, but Pulp-coupled), or seal to V8's full
   public ABI and use the Pulp scrape only as a completeness check (reusable by
