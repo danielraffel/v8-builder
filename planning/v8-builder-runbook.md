@@ -58,6 +58,9 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P4.0 | Standalone validate/ harness (OS-agnostic) | DONE ✅ | Real V8-init + identity + forced flat-ICU coexistence. **Built+run locally on mac vs our sealed dylib: PASS** (V8 15.1.0 inits, evals 20+22=42, ICU coexists). Dawn-Abseil path via optional SKIA_DAWN_LIB (pulp demo already covers mac). CI-ready. |
 | P4.1 | CI: build-v8.yml (GitHub-hosted) | READY* | real pipeline (build-v8.py mac proven + linux lane + standalone validator). *Minor CI-tuning expected on first run (SKIA_DIR subpath, Linux STL/ABI, Dawn frameworks). win=separate DLL lane. |
 | P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
+| SKIA-M150 | Migrate Pulp m149→m150 (AFTER V8 integration lands+merges) | PLANNED | user 2026-06-04: land V8 integration FIRST; then bump Skia to m150, rebuild pulp, fix breakage (SkRegion::setRects→SkSpan; SkStrikeRef in TextShaper), push followup, verify libs. THEN continue sweeps + iOS/Android. |
+| P5 | iOS (jitless) | PLANNED | after m150 verified |
+| P6 | Android (NDK) | PLANNED | after iOS |
 | PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
 
 ---

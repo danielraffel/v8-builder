@@ -50,8 +50,12 @@ jobs:
         shell: bash
         run: |
           P="${{ inputs.platforms }}"; ID="${{ matrix.platform }}/${{ matrix.arch }}"
-          if [ "$P" = "all" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else
-            IFS=','; for x in $P; do [ "$x" = "$ID" ] && echo "go=true" >> "$GITHUB_OUTPUT"; done; fi
+          GO=false
+          if [ "$P" = "all" ]; then GO=true; else
+            IFS=','; for x in $P; do if [ "$x" = "$ID" ]; then GO=true; fi; done
+          fi
+          echo "go=$GO" >> "$GITHUB_OUTPUT"
+          echo "selected $ID -> go=$GO"
       - if: steps.sel.outputs.go == 'true'
         uses: actions/checkout@v6
       - if: steps.sel.outputs.go == 'true'
