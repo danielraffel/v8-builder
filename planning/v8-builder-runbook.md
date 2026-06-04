@@ -4,6 +4,11 @@
 **Companion to:** `planning/v8-builder-proposal.md` (read that for the *why*).
 **Date:** 2026-06-03
 
+> **Settled direction (2026-06-03):** flagship = **i18n ON + V8 as a SHARED library**
+> (`.dylib`/`.so`/`.dll`) on all 3 platforms (export-table ICU seal, like `libnode`);
+> audience = general. Build/seal steps below target that shape. An optional static
+> i18n-off "lite" variant can follow.
+
 This is the step-by-step, gated plan to: (1) set up the public `v8-builder` repo,
 (2) build sealed V8 per platform, (3) validate it coexists with Skia/Dawn **locally
 against `/Users/danielraffel/Code/pulp`** (our V8 vs Homebrew `libnode`), then (4) on
@@ -19,6 +24,32 @@ Grounded in Pulp's real contract (verified, not assumed):
   <png>` (real `THREE.WebGPURenderer` on V8 + Dawn) and `capture_test.cmake`.
 - `core/view/platform/mac/screenshot_mac.mm` (mac capture exists; **win/linux capture
   is a gap to confirm**).
+
+---
+
+## 📊 Progress tracker (single source of truth — keep in sync with the task list)
+
+Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **Status** and
+**Notes** here whenever a task changes state, and mirror it 1:1 with TaskCreate/TaskUpdate.
+
+| ID | Item | Status | Notes |
+|----|------|--------|-------|
+| P0.1 | Scaffold local repo (files, skeletons) | TODO | public push deferred until explicit go |
+| P0.2 | Harden Pulp capture test → identity-anchored gate | TODO | engine + GPU-backend identity, no skip-pass |
+| P0.3a | Positive control: harness PASSES against libnode | TODO | |
+| P0.3b | Negative control A: unsealed V8 → link FAILS (dup ICU) | TODO | |
+| P0.3c | Negative control B: substituted engine → FAILS identity | TODO | |
+| P0.4 | Settle static-vs-shared spike (D5) + single-lib (§9) | DONE | shared, i18n-on (settled 2026-06-03) |
+| P0b.1 | Windows shared-lib slice: build + Pulp link + harness | TODO | cheapest-first proof of product shape |
+| P1.1 | Linux x64 shared lib, sealed, i18n-on | TODO | match real Skia STL (libstdc++) |
+| P1.2 | Linux validation: forced-collision + identity harness | TODO | |
+| P2.1 | macOS shared lib (arm64, x86_64, universal), sealed | TODO | |
+| P2.2 | macOS A/B: ours vs Homebrew libnode through Pulp | TODO | identity proves the swap is real |
+| P2.3 | Flip Pulp default off libnode (D4) | TODO | only after A/B green |
+| P3.1 | Windows i18n-on DLL (export-table seal) | TODO | |
+| P4.1 | CI: build-v8.yml + validate-v8.yml, all-3-OS harness | TODO | pinned runners, validate-all gate |
+| P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
+| PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
 
 ---
 
