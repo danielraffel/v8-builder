@@ -284,7 +284,9 @@ class V8Build:
 
     def inject_seal_target(self):
         build_gn = V8_DIR / "BUILD.gn"
-        text = build_gn.read_text()
+        # Force UTF-8: V8's BUILD.gn contains non-ASCII (e.g. U+2192 "→") and Windows
+        # defaults Path.read_text/write_text to cp1252, which can't encode it.
+        text = build_gn.read_text(encoding="utf-8")
         if self.SEAL_MARKER in text:
             say("seal target already injected")
             return
@@ -303,17 +305,18 @@ class V8Build:
             # export lists in V8 root (Mach-O patterns + ELF version script)
             (V8_DIR / "v8_embedder_exports.txt").write_text(
                 "\n".join(["__ZN2v8*", "__ZNK2v8*", "__ZTVN2v8*", "__ZTIN2v8*",
-                           "__ZTSN2v8*", "__ZN6cppgc*", "__ZNK6cppgc*"]) + "\n")
+                           "__ZTSN2v8*", "__ZN6cppgc*", "__ZNK6cppgc*"]) + "\n",
+                encoding="utf-8")
             run([sys.executable, str(SEAL_DIR / "elf.py"), "version-script",
                  "--out", str(V8_DIR / "v8_embedder_exports.map")], env=self.env)
-        build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n")
+        build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n", encoding="utf-8")
         say("injected v8_sealed_shared gn target")
 
     def gn_gen(self, arch):
         out = V8_DIR / "out" / f"{self.args.platform}-{arch}"
         args_gn = "\n".join(platform_gn_args(self.args.platform, arch)) + "\n"
         out.mkdir(parents=True, exist_ok=True)
-        (out / "args.gn").write_text(args_gn)
+        (out / "args.gn").write_text(args_gn, encoding="utf-8")
         say(f"args.gn:\n{args_gn}")
         run(["gn", "gen", str(out)], cwd=V8_DIR, env=self.env)
         return out
@@ -385,7 +388,7 @@ class V8Build:
             # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
             "pair": self._lkgr_contract(),
         }
-        (dest / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         say(f"packaged {dest}")
 
     def run_all(self):
