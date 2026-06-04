@@ -40,9 +40,14 @@ DEFAULT_V8_TAG = "14.6.202.33"
 # which seal/macho.py then wraps into a dylib exporting only v8::/cppgc::.
 def common_gn_args():
     return [
-        'is_official_build=true',
+        # is_official_build=false ON PURPOSE: official build forces ThinLTO (→ bitcode
+        # archives that nm can't audit and that complicate sealing) AND applies
+        # -fvisibility-global-new-delete=force-hidden, which clashes with the macOS 26.5
+        # SDK libc++ (_LIBCPP_OVERRIDABLE_FUNC_VIS). A plain release sidesteps both and
+        # still gives -O3/NDEBUG. The C++ ABI that must match Skia (libc++, rtti,
+        # exceptions) is unaffected by this toggle.
+        'is_official_build=false',
         'is_debug=false',
-        'chrome_pgo_phase=0',                   # embedder build: no PGO (avoids profile fetch)
         'v8_monolithic=true',
         'v8_use_external_startup_data=false',
         'v8_enable_i18n_support=true',          # D2: Intl ON

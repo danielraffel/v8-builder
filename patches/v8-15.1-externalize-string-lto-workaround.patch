@@ -1,0 +1,88 @@
+diff --git a/src/extensions/externalize-string-extension.cc b/src/extensions/externalize-string-extension.cc
+index 682edca1e4..b2dc969612 100644
+--- a/src/extensions/externalize-string-extension.cc
++++ b/src/extensions/externalize-string-extension.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "src/extensions/externalize-string-extension.h"
+ 
++#include <memory>
++
+ #include "include/v8-template.h"
+ #include "src/api/api-inl.h"
+ #include "src/base/strings.h"
+@@ -13,7 +15,6 @@
+ #include "src/objects/heap-object-inl.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/string.h"
+-#include "src/strings/owning-external-string-resource.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -73,6 +74,52 @@ ExternalizeStringExtension::GetNativeFunctionTemplate(
+ 
+ namespace {
+ 
++class ExternalizedOneByteStringResource final
++    : public v8::String::ExternalOneByteStringResource {
++ public:
++  explicit ExternalizedOneByteStringResource(Tagged<String> source)
++      : length_(source->length()),
++        storage_(std::make_unique_for_overwrite<char[]>(length_)) {
++    String::WriteToFlat(source, reinterpret_cast<uint8_t*>(storage_.get()), 0,
++                        static_cast<uint32_t>(length_));
++  }
++
++  ~ExternalizedOneByteStringResource() override;
++
++  const char* data() const override { return storage_.get(); }
++  size_t length() const override { return length_; }
++
++ private:
++  const size_t length_;
++  const std::unique_ptr<char[]> storage_;
++};
++
++ExternalizedOneByteStringResource::~ExternalizedOneByteStringResource() =
++    default;
++
++class ExternalizedTwoByteStringResource final
++    : public v8::String::ExternalStringResource {
++ public:
++  explicit ExternalizedTwoByteStringResource(Tagged<String> source)
++      : length_(source->length()),
++        storage_(std::make_unique_for_overwrite<base::uc16[]>(length_)) {
++    String::WriteToFlat(source, storage_.get(), 0,
++                        static_cast<uint32_t>(length_));
++  }
++
++  ~ExternalizedTwoByteStringResource() override;
++
++  const uint16_t* data() const override { return storage_.get(); }
++  size_t length() const override { return length_; }
++
++ private:
++  const size_t length_;
++  const std::unique_ptr<base::uc16[]> storage_;
++};
++
++ExternalizedTwoByteStringResource::~ExternalizedTwoByteStringResource() =
++    default;
++
+ bool HasExternalForwardingIndex(DirectHandle<String> string) {
+   if (!string->IsShared()) return false;
+   uint32_t raw_hash = string->raw_hash_field(kAcquireLoad);
+@@ -107,11 +154,11 @@ void ExternalizeStringExtension::Externalize(
+     return;
+   }
+   if (externalize_as_one_byte) {
+-    auto* resource = new OwningExternalOneByteStringResource(*string);
++    auto* resource = new ExternalizedOneByteStringResource(*string);
+     result = Utils::ToLocal(string)->MakeExternal(info.GetIsolate(), resource);
+     if (!result) delete resource;
+   } else {
+-    auto* resource = new OwningExternalStringResource(*string);
++    auto* resource = new ExternalizedTwoByteStringResource(*string);
+     result = Utils::ToLocal(string)->MakeExternal(info.GetIsolate(), resource);
+     if (!result) delete resource;
+   }
