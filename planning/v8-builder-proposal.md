@@ -253,8 +253,16 @@ Everything else is skia-builder mechanics.
 
 ### 6b. Honest solution status & confidence per platform
 
-We do **not** have an equally-proven solution on all three. Stated bluntly so we
-don't ship false confidence:
+> **RECOMMENDED PATH (settled with requester 2026-06-03): i18n ON + ship V8 as a
+> SHARED library on all three platforms.** This makes the seal uniform (export table
+> exposes only `v8::`/`cppgc::`, ICU/zlib stay internal — exactly how `libnode`
+> works), and it **resolves the one "UNSOLVED" row below** (Windows static `.lib` +
+> sealed ICU + Intl) by not using a static `.lib` for the flagship. Pulp already
+> links a shared V8 (`libnode.dylib`) today, so this fits its contract. The static
+> table below remains the reference for an optional i18n-off "lite" variant.
+
+We do **not** have an equally-proven solution on all three *for the static case*.
+Stated bluntly so we don't ship false confidence:
 
 | Platform | i18n | Sealing mechanism | Confidence | Status |
 |----------|------|-------------------|-----------|--------|
@@ -563,13 +571,15 @@ successful link, on operational details. Plan these up front:
 - **D1 — V8 version pin.** Match the V8 inside the `libnode` we use today
   (Node 26 → V8 ~13.x?) for API parity, or pin to a clean upstream V8 tag and
   re-validate choc against it? Recommend: pin to a V8 tag and confirm choc builds.
-- **D2 — i18n / ICU on or off.** *On* = `Intl` works, libnode parity, but requires
-  the sealing step and ~10 MB duplicate ICU data at runtime (same as libnode does
-  today). *Off* (`v8_enable_i18n_support=false`) = no ICU in V8 at all → zero
-  collision risk, smaller, but loses `Intl`. Recommend: **on** for mac/linux
-  (parity); **off is the required v1 lane for Windows** (per pass-1 review, sealing
-  ICU in a COFF `.lib` is unsolved — i18n-off is the only credible first Windows
-  build, with sealed-ICU Windows as a later spike).
+- **D2 — i18n / ICU on or off. → RECOMMEND ON (general-artifact decision).** Pulp
+  *itself* uses no `Intl` (grep 2026-06-03: zero `Intl`/locale usage in Pulp runtime
+  JS or bundled `three.webgpu.js`; the one `localeCompare` is build-time Node
+  tooling). **But this is a public artifact Oli and others will embed (D7 = general),
+  and a V8 without `Intl` is a crippled V8 most embedders reject.** So keep i18n
+  **on** for the flagship build. That *requires* solving the ICU seal — which is why
+  D2 drives D5: **the clean way to seal ICU with i18n on, on every platform incl.
+  Windows, is a shared library** (export-table boundary). Optionally also publish a
+  static, i18n-off "lite" variant for size-sensitive embedders.
 - **D2b — Linux STL.** Match V8 to whatever STL the real Skia Linux build resolves
   to (likely **libstdc++**, since Skia doesn't set `use_custom_libcxx`). Confirm
   empirically and pin; do not assume libc++.
@@ -580,8 +590,17 @@ successful link, on operational details. Plan these up front:
 - **D4 — Drop `libnode` on macOS immediately, or run both lanes in parallel?**
   Recommend: keep `libnode` as fallback until the sealed monolith passes
   validation on macOS, then flip Pulp's default.
-- **D5 — Do we also need a shared lib (`.dylib`/`.so`/`.dll`)** or is the static
-  monolith sufficient for Pulp/iPlug? (Static assumed in v1.)
+- **D5 — Static vs shared. → RECOMMEND SHARED (`.dylib`/`.so`/`.dll`) as the
+  flagship.** With i18n **on** (D2), a shared library is the *clean, uniform* seal on
+  all three platforms: the export table exposes only `v8::`/`cppgc::` and ICU/zlib
+  stay internal — **exactly how Homebrew `libnode` already seals ICU on macOS today.**
+  Decisive point: **Pulp's current macOS V8 lane already links a shared lib
+  (`libnode.dylib`), so shared is the proven shape for Pulp's `V8_LIBRARY_PATH`
+  contract — not a new burden.** It also *solves Windows-with-`Intl`* (the one
+  unsolved static case in §6b) because a DLL has a real export boundary. Cost:
+  consumers ship + load the dynamic lib (`@loader_path`/`$ORIGIN`/DLL-search) — but
+  audio plugins already bundle dylibs/DLLs, and Pulp already does this for libnode.
+  *(Keep static i18n-off as an optional secondary artifact.)*
 - **D6 — Tart CI runner coverage.** Confirm the self-hosted Tart runner's exact
   OS/arch (Apple-silicon Linux VM? Windows-capable?) so we know which validation
   targets it can host vs. which must stay on stock GitHub runners. Validation runs
@@ -595,11 +614,10 @@ successful link, on operational details. Plan these up front:
   `mNNN → V8 version` mapping lives (pinned chromiumdash lookup committed to the
   repo vs. resolved live at build time). Must stay parseable by Pulp's dependency
   pin and aligned with the Skia branch Pulp uses.
-- **D7 — Artifact audience: Pulp-specific vs general embedder.** Seal aggressively
-  to a Pulp-scraped keep-list (smallest, but Pulp-coupled), or seal to V8's full
-  public ABI and use the Pulp scrape only as a completeness check (reusable by
-  iPlug and future Pulp/choc changes). Recommend the latter unless footprint
-  forces otherwise.
+- **D7 — Artifact audience. → GENERAL (confirmed by requester 2026-06-03):** "folks
+  in other places will want to use" it. So seal to V8's **full public ABI**
+  (`v8::`+`v8::platform`+`cppgc::`), using any Pulp scrape only as a completeness
+  check — never narrow the export set to just Pulp's current needs.
 
 ## 11. Phased rollout
 

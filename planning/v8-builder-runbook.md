@@ -24,21 +24,22 @@ Grounded in Pulp's real contract (verified, not assumed):
 
 ## ⚠️ Gate 0 — Decisions to lock before I build anything
 
-These are from the proposal (D1–D9). My **recommended defaults** so you can approve in
-one pass; tell me to change any:
+These are from the proposal (D1–D9). **D2/D5/D7 are now settled with the requester**
+(2026-06-03); the rest have recommended defaults — tell me to change any:
 
-| # | Decision | Recommended default |
-|---|----------|---------------------|
-| D5 | static `.a`/`.lib` vs **shared** `.dylib`/`.so`/`.dll` | **Spike both in Phase 0**; lean shared on Windows (real export boundary) |
-| D2 | i18n on/off | on for mac/linux; **off for Windows v1** |
+| # | Decision | Setting |
+|---|----------|---------|
+| **D2** | i18n / `Intl` | **ON** — public artifact; others will embed it and expect `Intl` |
+| **D5** | static vs shared | **SHARED** (`.dylib`/`.so`/`.dll`) as flagship — clean ICU seal via export table on all 3 OSes incl. Windows; matches how Pulp links libnode today. Optional static i18n-off "lite" later |
+| **D7** | audience | **GENERAL** — seal to full V8 public ABI, not a Pulp-narrowed set |
 | D1 | V8 version pin | milestone matching skia-builder's default Skia branch (see §9b) |
-| D7 | Pulp-specific vs general seal | **general** (keep-list = V8 public ABI; Pulp scrape = completeness check) |
 | D4 | drop libnode on mac | keep as fallback until sealed build passes A/B |
 | D3 | pointer-compression/sandbox | pick one, hold constant, assert define-match in Pulp TU |
 | D8/D9 | tag format + pair lockfile | `mNNN-v8-<version>` + validated pair lockfile |
 
-**I will not start Phase 1+ until D5 and D2 are confirmed** — they change the build.
-Phase 0 (harness + controls) is safe to build regardless.
+**With D2/D5 settled the build is unblocked.** The flagship is **shared, i18n-on**;
+the Windows static-`.lib` "unsolved" case is sidestepped (we don't use a static
+`.lib` for the flagship). Phase 0 (harness + controls) is safe to build regardless.
 
 ---
 
