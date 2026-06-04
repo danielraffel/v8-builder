@@ -86,7 +86,31 @@ Mach-O dedup) is the proven analog. NOT pushed blind.
 
 ---
 
-## ELF seal — RESOLVED (2026-06-04, on-Linux arm64 loop via QEMU+HVF)
+## ⚠️ CORRECTION (2026-06-04, later): the bug is REAL with Temporal/Rust ON
+
+The "RESOLVED" claim immediately below was **PREMATURE**. A faithful GitHub CI build
+(run 26961155381, x86_64, V8 **15.1.27**, **Temporal/Rust ON**, bundled clang-23 + lld)
+**reproduced the exact duplicate-symbol failure**:
+```
+ld.lld: error: duplicate symbol: v8::internal::AllowCompilation::Close(...)
+>>>   assert-scope.o:(v8::internal::AllowCompilation::Close...) in archive obj/libv8_monolith.a   (on-demand pull)
+>>>   assert-scope.o:(.text+0x0)                               in archive obj/libv8_monolith.a   (--whole-archive pull)
+```
+So a monolith member is pulled BOTH by `--whole-archive` AND on-demand from the plain
+deps copy. My synthetic repro + gn-order analysis were done with **Temporal OFF**
+(`v8_enable_temporal_support=false`, to dodge the rust toolchain on the arm64 host) — and
+with no Rust closure, whole-archive-first IS clean. **With the Rust closure ON, the link
+graph changes** (the rlibs / rust integration create monolith refs that get satisfied from
+the plain deps archive in addition to the whole-archive copy) and the duplicate returns.
+**Net: the seal target DOES still need a fix** (candidates below / the `whole_archive.py`
+LinkWrapper). The bug is now **faithfully reproduced on CI** — so CI (≈1h) or a **Tart
+x86_64 Linux VM on the Mac Studio** (bundled toolchain runs natively-in-emulation) is the
+loop to fix it on. Lead fix: reference the monolith **exactly once**, whole-archived, while
+still pulling the Rust closure — via Chromium's blessed `-LinkWrapper,add-whole-archive`
+(`build/toolchain/whole_archive.py`) rather than hand-rolled `--whole-archive` ldflags that
+race the deps-emitted monolith. Re-examine candidate #1 on the faithful loop.
+
+## ELF seal — (earlier, Temporal-OFF analysis; see CORRECTION above)
 
 Stood up a real on-Linux iteration loop (arm64 Ubuntu 24.04 in QEMU+HVF on Apple
 Silicon; egress via a host HTTP-CONNECT proxy reverse-tunneled in; V8 15.1 synced at
