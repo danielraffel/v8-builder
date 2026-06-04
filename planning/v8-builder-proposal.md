@@ -200,6 +200,13 @@ undefined V8/cppgc symbols from Pulp's `js_v8_engine.cpp` + choc V8 wrapper obje
 files and use exactly that set, so the seal can never drop something the consumer
 needs.
 
+> **Audience decision (pass 2) — D7.** Scraping *only* Pulp's current undefined
+> symbols yields a **Pulp-specific** binary: iPlug, or a future choc/Pulp change,
+> could need a symbol we localized. If we want a **general** V8 embedder artifact,
+> build the keep-list from V8's public ABI surface (`v8::` + `v8::platform` +
+> `cppgc::`) and use Pulp's scraped set only as a *completeness check*, not the
+> definition. Pick one (see D7); it changes how aggressively we seal.
+
 This file (plus the Windows spike) is the genuinely novel part of the repo.
 Everything else is skia-builder mechanics.
 
@@ -226,6 +233,21 @@ Modeled directly on `build-skia.yml`:
 Caching note: V8 source + build is large; reuse skia-builder's disk-freeing step
 on Linux and shallow-sync where possible.
 
+**CI design corrections (pass 2 — do NOT clone skia-builder's workflow verbatim):**
+
+- skia-builder filters platforms by **substring** (`platforms == *matrix.platform*`)
+  and only releases when `platforms == 'all'`, with a **hard-coded** asset list in
+  the release job. For a repo where *validation is the product*, copy none of these
+  three: parse `platforms` into an **exact list**, generate the release asset list
+  **dynamically** from artifacts that passed validation, and gate the release on a
+  dedicated **`validate-all` aggregation job** (not on `platforms == 'all'`). Allow
+  a partial release only when explicitly requested, and mark the validated target
+  set in the release `manifest.json`.
+- **Pin runner images** (`ubuntu-24.04`, `macos-15`, `windows-2022` exact, not
+  `*-latest`) and record the image version in `manifest.json`; floating images
+  drift toolchains silently. Re-run `validate-v8.yml` against published artifacts
+  after any runner/toolchain bump.
+
 ## 8. Validation lane — "prove it works on Windows/Linux like we think"
 
 This is the **single most important part** of the project, not an afterthought.
@@ -251,6 +273,16 @@ and standalone via `validate-v8.yml` against a published release):
 
 1. **Download the matching Skia artifact** from `skia-builder` releases for the
    same platform/arch (so we link against the *real* Skia, not a stub).
+   **ABI-provenance gate (pass 2):** "matching" is underspecified and hides skew.
+   Pin `skia_release_tag` as a workflow input, **verify SHA256** of every Skia
+   lib/header bundle, and require the Skia artifact to carry a machine-readable
+   provenance manifest (exact Skia commit, compiler version, libstdc++/glibc
+   baseline on Linux, Windows toolset + CRT directives, Dawn commit). Derive the
+   validator's ABI flags from the **Skia + V8 manifests**, and **fail validation if
+   any provenance field is unknown** — otherwise we only prove "works with whatever
+   CI downloaded today," not "works with the Skia Pulp will actually consume."
+   *(This likely requires a small upstream addition to skia-builder's own manifest —
+   note as a cross-repo dependency.)*
 2. **Symbol audit (static):** assert the sealed V8 archive exports zero flat
    ICU/zlib symbols and a *complete* set of public `v8::`/`cppgc::` symbols
    (`nm`/`readelf`/`dumpbin`). Fail if sealing regressed or the whitelist dropped a
@@ -265,7 +297,19 @@ and standalone via `validate-v8.yml` against a published release):
    - if i18n on, exercise `Intl` to prove V8's sealed ICU still resolves its data;
    - render **text via SkParagraph/SkShaper** (forces Skia's ICU+HarfBuzz) and
      **encode a PNG** (forces zlib), asserting a pixel/byte hash — *not* a bare rect;
-   - (stretch) init a Dawn/WebGPU device to prove the GPU side coexists.
+   - (stretch, **non-gating**) init a Dawn/WebGPU device. Real WebGPU on stock
+     Linux/Windows runners is flaky (no GPU/adapter, headless) — keep Dawn init
+     optional or use a null/SwiftShader backend; **do not gate the release on it**.
+     The deterministic gates are: V8 eval, SkParagraph/SkShaper, PNG encode/decode.
+
+**The release gate compiles the *real consumer path*, not just synthetic TUs (pass
+2):** make the primary, gating validation target a **Pulp/choc-shaped compile**
+— vendor a minimal fixture derived from `js_v8_engine.cpp` + `choc_javascript_V8.h`
+and build it through the *same* CMake variables Pulp uses (`V8_INCLUDE_DIR`,
+`V8_LIB_DIR`, `V8_LIBRARY_PATH`). This catches compile-time **define drift**
+(sandbox/pointer-compression), header-layout issues, and choc API expectations that
+a hand-written `smoke_v8.cpp` would miss. Keep the synthetic forced-collision
+binary as an *additional* stress test, not the gate.
 5. **Report + gate:** result goes into the artifact `manifest.json`
    (`validated: true`, platform, runner image, V8 + Skia versions, STL/CRT flavor).
    `create-release` is **gated** on validation passing for every requested target.
@@ -313,6 +357,15 @@ to verify during review: that choc's V8 wrapper compiles against `v8_monolith`
 headers the same way it does against `libnode`'s headers (header layout differs:
 node ships V8 headers under `include/node/`).
 
+**Single-library-path trap (pass 2):** the `V8_LIBRARY_PATH` contract assumes one
+archive is enough, but embedders need `v8::platform::*` (and `cppgc`), and
+depending on V8's build layout `v8_libplatform` may **not** be folded into
+`v8_monolith`. If it stays separate, a single path is insufficient. **Phase 0 must
+prove one of:** (1) our `v8_monolith` already contains all required
+`v8::platform`/`cppgc` symbols (assert in the symbol audit); (2) we post-link a
+*combined* static lib that preserves the single-path contract; or (3) we extend the
+provider contract to accept a `V8_LIBRARIES` list. Decide before building Linux.
+
 ## 10. Decisions to settle (flag for Oli / review)
 
 - **D1 — V8 version pin.** Match the V8 inside the `libnode` we use today
@@ -341,16 +394,31 @@ node ships V8 headers under `include/node/`).
   OS/arch (Apple-silicon Linux VM? Windows-capable?) so we know which validation
   targets it can host vs. which must stay on stock GitHub runners. Validation runs
   on **both** before a platform is declared validated.
+- **D7 — Artifact audience: Pulp-specific vs general embedder.** Seal aggressively
+  to a Pulp-scraped keep-list (smallest, but Pulp-coupled), or seal to V8's full
+  public ABI and use the Pulp scrape only as a completeness check (reusable by
+  iPlug and future Pulp/choc changes). Recommend the latter unless footprint
+  forces otherwise.
 
 ## 11. Phased rollout
 
-1. **Phase 0 — macOS arm64, i18n-on, sealed.** Reproduce `libnode`'s sealed-ICU
-   property from source and pass the validation lane against a real Skia artifact.
-   This proves the hard part once.
-2. **Phase 1 — macOS x86_64 + universal**, flip Pulp default off `libnode` (D4).
-3. **Phase 2 — Linux x64**, full validation. First *new* platform.
-4. **Phase 3 — Windows x64**, `/MT`, full validation. Highest-risk ABI surface.
-5. **Phase 4 — arm64 Linux/Windows** (uncomment matrix rows), CPU/other variants.
+Reordered after pass 2: the requester's bar is **Linux/Windows** confidence, so we
+prove the cross-link and the new platforms early rather than spending two phases on
+macOS first.
+
+1. **Phase 0 — build the validation harness + positive/negative controls** and
+   settle the single-library question (§9). Prove the harness *fails* on an
+   unsealed V8 (negative control) and *passes* on a known-good combo (positive
+   control) before trusting any green. Pick one platform to bring up first here
+   (macOS arm64 is the cheapest place to debug the sealing recipe).
+2. **Phase 1 — Linux x64, i18n-on, sealed.** First *new* validated provider; the
+   single-object internalization recipe gets proven on the platform we care about.
+3. **Phase 2 — macOS arm64 + x86_64 + universal**, then flip Pulp's default off
+   `libnode` (D4) once validation is green.
+4. **Phase 3 — Windows x64, i18n-off, `/MT`.** Bring up the ABI/CRT lane *without*
+   waiting on the unsolved ICU-sealing spike — get a validated Windows V8 sooner.
+5. **Phase 4 — Windows sealed-ICU spike** (COFF internalization / symbol prefix),
+   then arm64 Linux/Windows (uncomment matrix rows) and other variants.
 
 ## 12. Open risks
 
@@ -378,9 +446,17 @@ node ships V8 headers under `include/node/`).
   lane**; corrected Skia ABI facts (`use_rtti` not `v8_enable_rtti`; Skia uses
   default STL = libstdc++ on Linux, not libc++; `/MT`); and caught the
   **draw-rect false-pass** in the validation lane. All folded into §5/§6/§8/§10.
-- **Pass 2 — RepoPrompt oracle.** _(pending)_
+- **Pass 2 — RepoPrompt oracle (review mode), 2026-06-03.** Additive critique
+  folded in: don't clone skia-builder's substring filtering / `==all` release gate
+  / hard-coded asset list (§7); pin + SHA256-verify + provenance-check the Skia
+  artifact used for validation, deriving validator ABI flags from manifests (§8);
+  make the **release gate compile the real Pulp/choc V8 path**, not just synthetic
+  smoke (§8); the `v8_libplatform`/`cppgc` single-library trap → prove or extend to
+  `V8_LIBRARIES` (§9); Dawn runtime is non-gating/flaky (§8); reorder phases so
+  **Linux and Windows-i18n-off come early** (§11); decide Pulp-specific vs general
+  artifact (D7); pin runner images (§7).
 
 ---
 
-*Revised after Codex pass 1. Next: RepoPrompt oracle review (pass 2), then a short
-revision and discussion with the requester.*
+*Revised after Codex (pass 1) and RepoPrompt oracle (pass 2). Ready for discussion
+with the requester. Open decisions D1–D7 below need owner input before Phase 0.*
