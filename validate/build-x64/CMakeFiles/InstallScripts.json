@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/danielraffel/Code/v8-builder/validate/build-x64/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
