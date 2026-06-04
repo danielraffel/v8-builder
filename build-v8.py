@@ -155,13 +155,16 @@ def win_gn_args(arch):
         # v8.dll (+ v8.dll.lib import lib). See seal/coff_research.md.
         'is_component_build=false',
         'v8_expose_public_symbols=true',
-        # Same consumable-ABI reasoning as Linux: V8's public API exposes std types, and
-        # the bundled libc++ mangles them with Chromium's __Cr ABI namespace. The standard
-        # Windows C++ ABI is the MSVC STL, so build against it so a normal MSVC/clang-cl
-        # consumer (incl. the coexistence validator) links without an ABI mismatch. No
-        # use_sysroot toggle needed on Windows (Win SDK + modern MSVC STL used directly).
-        'use_custom_libcxx=false',
-        'use_custom_libcxx_for_host=false',
+        # NOTE — Windows consumer-ABI is an OPEN DECISION (needs Pulp's Windows toolchain).
+        # Keep V8's BUNDLED libc++ here: it builds + seals + audits clean (proven, CI run
+        # 26975751590 → [2432/2432] v8.dll). Switching to the MSVC STL (use_custom_libcxx=
+        # false) for a drop-in MSVC ABI instead re-triggers a Torque-vs-C++ offset break
+        # (JSInterceptorMap, CI 26984416635) — the compression-ON × MSVC-STL × non-component
+        # matrix is undercovered upstream, fixable only by invasive per-object Torque
+        # patches. So Windows v8.dll exposes the Chromium-style libc++ (__Cr) ABI; a
+        # consumer (and the coexistence validator) must build with clang-cl + that libc++ —
+        # which is how the Chromium ecosystem does Windows. Revisit if Pulp's Windows build
+        # uses MSVC cl + MSVC STL. See seal/coff_research.md.
     ]
 
 
