@@ -99,7 +99,7 @@ jobs:
     if: ${{ !inputs.skip_release }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "Gate: release only if every requested platform produced a VALIDATED artifact."
+      - run: echo "Gate - release only if every requested platform produced a VALIDATED artifact."
 
   create-release:
     needs: validate-all
