@@ -31,6 +31,31 @@ iOS/visionOS are explicitly **out of scope** (Pulp uses JavaScriptCore there; a
 from-source iOS V8 is a ~50 GB workspace and not on a ship path — per
 `v8-with-skia-dawn-for-oli.md`).
 
+## 1b. Premise check — is this even the right boundary? (adversarial pass 3)
+
+Codex's strongest objection: **this may be overbuilt.** macOS already has a working
+sealed-ICU provider (`libnode`), and QuickJS is the portable default everywhere. A
+static `v8_monolith` is the *hardest* ownership model — Chromium toolchain churn,
+V8 security-patch pressure, ICU/zlib sealing, STL/CRT matching, per-linker behavior.
+So we should hold this gate honestly:
+
+- **This is justified only if Linux/Windows V8 is a real shipping requirement**, not
+  "nice to validate someday." If it isn't, the cheaper paths win: keep `libnode` on
+  macOS, ship QuickJS on Linux/Windows, and stop.
+- **If V8-on-Linux/Windows IS required, reconsider the boundary** before committing
+  to static sealing: a **shared library** (`.so`/`.dll`/`.dylib`) that we build to
+  seal ICU/zlib internally — i.e. a `libnode`-style provider we control — may be a
+  *more natural* sealing boundary than a static archive, because dynamic libraries
+  have a real export table to hide symbols behind (the exact mechanism that makes
+  `libnode` work today). Static monolith vs. controlled shared lib is **decision D5,
+  and it should be settled in Phase 0**, not assumed. The rest of this doc assumes
+  static because that's what the contract asks for, but the shared-lib alternative
+  is live and may be less work.
+
+> Bottom line: don't build a general static i18n-on cross-platform V8 because it's
+> impressive. Build the *minimum* provider that makes V8 ship on the platforms that
+> actually need it — and only after the validation harness can prove a bad build bad.
+
 ## 2. Why this is *not* just "skia-builder for V8"
 
 `skia-builder` and a V8 builder share ~80% of their machinery (both are
@@ -81,6 +106,22 @@ v8-builder/
     ├── build-v8.yml               # build matrix + release (mirrors build-skia.yml)
     └── validate-v8.yml            # standalone re-validation of a release
 ```
+
+**Separate repo, shared contract (pass 3).** Keep `v8-builder` separate from
+`skia-builder` — V8 sealing, snapshots, i18n, and release cadence are different
+enough that folding them in would pollute Oli's working repo with V8-specific
+failure modes. But to avoid long-term drift (both Oli and Daniel host/run both),
+define a small **shared contract** the two repos agree on: identical artifact
+layout, a common `manifest.json` schema, common platform/arch names, and reusable
+GitHub Actions snippets. Only merge into a single repo if the *output* ever becomes
+one paired "Skia+V8 SDK" release.
+
+**`seal/` is a policy + backends, not one script (pass 3).** Sealing is really a
+platform-specific linker pipeline plus an audit policy, so structure it as
+`seal/policy.json` (public-symbol policy, deny-list of ICU/zlib prefixes) +
+`seal/macho.py` + `seal/elf.py` + `seal/coff_research.md` (the unsolved Windows
+spike), not a monolithic `seal-symbols.py`. Keeps audits and per-platform
+differences from becoming ad hoc.
 
 ## 4. `build-v8.py` design
 
@@ -210,6 +251,38 @@ needs.
 This file (plus the Windows spike) is the genuinely novel part of the repo.
 Everything else is skia-builder mechanics.
 
+### 6b. Honest solution status & confidence per platform
+
+We do **not** have an equally-proven solution on all three. Stated bluntly so we
+don't ship false confidence:
+
+| Platform | i18n | Sealing mechanism | Confidence | Status |
+|----------|------|-------------------|-----------|--------|
+| **macOS** | on | (a) keep `libnode` (works today) **or** (b) static `v8_monolith` sealed via Mach-O `ld -r -exported_symbols_list` single-object internalization (two-level namespace helps) | **High** | (a) proven now; (b) well-trodden technique, unproven *in our context* |
+| **Linux** | on | static `v8_monolith` sealed via ELF `ld -r` + `objcopy --keep-global-symbols` single-object internalization (COMDAT care) | **Medium-high** | real, widely-used technique; **not yet proven for us** |
+| **Windows** | **off** | `v8_enable_i18n_support=false` → no ICU in V8 → nothing to seal, no collision | **High** | fully works; **loses `Intl`** |
+| **Windows** | **on**, static `.lib` | none clean — `.lib` has no export boundary, `/WHOLEARCHIVE` doesn't seal, COFF has no clean localize-global | **Low / UNSOLVED** | open research spike |
+| **Windows** | **on** | **build V8 as a DLL** whose export table exposes only `v8::`/`cppgc::` (a real export boundary — the actual analog to how `libnode` seals) | **Medium** | candidate, **not yet tried**; ties to D5 (static vs shared) |
+
+**So the honest answer to "do we have solutions for all three?":**
+- **macOS — yes** (two ways).
+- **Linux — yes, pending proof** (standard ELF internalization).
+- **Windows — yes *if* we accept one of:** (1) **i18n-off** (no `Intl`), which is a
+  guaranteed lane today; or (2) ship V8 **as a DLL** so there's a real export
+  boundary to seal behind. A **static `.lib` with sealed ICU and `Intl` on** is the
+  one combination that is genuinely **not solved** and must be treated as a spike,
+  not a plan.
+
+**Two cross-platform candidates worth a Phase-0 spike** (could simplify *all*
+platforms incl. Windows, but are **unverified** — do not assume):
+- **ICU symbol renaming instead of localization.** ICU has a built-in
+  symbol-suffix/namespace mechanism (`U_DISABLE_RENAMING`, version suffix). If we
+  build V8's ICU with a distinct suffix (e.g. `*_v8`) while Skia keeps bare names,
+  the symbols simply *don't collide* — a compile-time rename that works on COFF too,
+  no linker surgery. **Needs verification that V8's GN/ICU build allows this.**
+- **DLL/shared boundary everywhere** (D5): the cleanest seal is an export table;
+  static archives are the hard case on every platform, worst on Windows.
+
 ## 7. CI workflow (`build-v8.yml`)
 
 Modeled directly on `build-skia.yml`:
@@ -302,6 +375,32 @@ and standalone via `validate-v8.yml` against a published release):
      optional or use a null/SwiftShader backend; **do not gate the release on it**.
      The deterministic gates are: V8 eval, SkParagraph/SkShaper, PNG encode/decode.
 
+**"No room for hallucination" means asserting IDENTITY, not pixels (pass 3 — the
+single most important correction to the test harness).** A screenshot/golden image
+on headless CI is *easy to fake*: it can render through SwiftShader / WARP / a null
+adapter / llvmpipe / **CPU Skia**, show a cached frame, or — worst of all — be
+produced by a **fallback JS engine (QuickJS) while V8 never loaded**, and still
+"look loaded." Async JS/module work and GPU fences can also race the capture. So the
+harness must make a green result *impossible without the real path*:
+   - **Engine identity, unfakeable:** the JS must compute something only V8 can, and
+     the binary must assert at runtime that the engine is V8 from *our* artifact —
+     e.g. read back `v8::V8::GetVersion()` and assert it equals the version recorded
+     in `manifest.json`, and assert the symbol came from our sealed lib (build the
+     fixture with the fallback engines compiled out, so a QuickJS pass is a link
+     error, not a silent substitution).
+   - **GPU backend identity:** if the Dawn path runs, assert the actual adapter /
+     backend type (and fail/skip explicitly on software adapters) — never infer
+     "GPU works" from pixels. Because backends are flaky on CI, GPU is **non-gating**
+     and its real-vs-software status is *recorded*, not assumed.
+   - **Collision-path proof:** assert (via the link/symbol audit, not the image)
+     that the ICU/shaper/zlib members were actually pulled — the screenshot is the
+     *last* signal, never the proof.
+   - **Determinism:** drive JS→render synchronously (await module + microtasks +
+     GPU fence) before capture; compare a tolerance-bounded hash of a region we
+     control, and store the image as an artifact for human spot-check. The hash is a
+     change-detector, not the pass criterion; the pass criterion is the identity
+     assertions above.
+
 **The release gate compiles the *real consumer path*, not just synthetic TUs (pass
 2):** make the primary, gating validation target a **Pulp/choc-shaped compile**
 — vendor a minimal fixture derived from `js_v8_engine.cpp` + `choc_javascript_V8.h`
@@ -310,6 +409,15 @@ and build it through the *same* CMake variables Pulp uses (`V8_INCLUDE_DIR`,
 (sandbox/pointer-compression), header-layout issues, and choc API expectations that
 a hand-written `smoke_v8.cpp` would miss. Keep the synthetic forced-collision
 binary as an *additional* stress test, not the gate.
+
+**Local-mac proof does NOT transfer to Linux/Windows (pass 3).** "Test against Pulp
+on my Mac, then trust win/linux CI" leaves a real gap: different linkers, STL/CRT,
+file layouts, plugin packaging, and sandbox/pointer-compression runtime behavior.
+The confidence bar must be **"a Pulp-linked binary compiles, links, and runs the
+screenshot harness on *each* target OS,"** not "generic validator passed + macOS
+Pulp passed." So the Pulp-shaped compile+link+run + screenshot harness runs in CI on
+**all three OSes**, and every run archives logs, symbol audits, executable SHA256,
+and the screenshot artifact for inspection.
 5. **Report + gate:** result goes into the artifact `manifest.json`
    (`validated: true`, platform, runner image, V8 + Skia versions, STL/CRT flavor).
    `create-release` is **gated** on validation passing for every requested target.
@@ -401,11 +509,54 @@ release tag:  m149-v8-13.6.233.8
   ICU version on both sides. "Validated against `chrome/m149`" is a first-class
   field, so Pulp knows which Skia this V8 is *proven* to coexist with.
 
-**Pulp consumption.** Pulp pins a single v8-builder release tag (e.g.
-`m149-v8-13.6.233.8`) in its dependency fetch, exactly as it pins `chrome/m149` for
-Skia. Bumping V8 is then a one-line tag change, and the build is only publishable if
-it passed validation against the paired Skia — so the pin carries a proof, not just
-a version. *(Decision D8 below: lock the exact tag string format.)*
+**The tag is ergonomics; the manifest is the truth (pass 3).** Milestone + Skia
+branch + V8 tag are *not* a perfect triangle — V8 carries branch-head cherry-picks
+and security patches, and "Skia chrome/m149" can be rebuilt later with a different
+compiler/Dawn revision under the same branch name. So the tag is for humans, and the
+manifest is authoritative and must pin **exact revisions, not just milestone
+labels**:
+
+```
+chromium_milestone        v8_version_tag        icu_version_v8
+chromium_deps_revision     v8_git_sha            icu_version_skia
+skia_release_tag           skia_git_sha          dawn_git_sha
+skia_artifact_sha256       v8_artifact_sha256    validator_commit
+```
+
+If milestone-pairing is the safety story, **resolve V8 from a pinned Chromium DEPS
+revision**, not from milestone metadata alone.
+
+**Pulp consumption — a pair lockfile, not two independent tags (pass 3).** Pulp
+pins the v8-builder tag for ergonomics, but the real contract is a **validated pair
+lockfile** recording `{skia_artifact_sha256, v8_artifact_sha256, validated_pair_id}`.
+That turns the pin into a reproducible, proven pairing rather than a vague
+"chrome/m149 ↔ some V8" compatibility claim that ages badly when either side is
+rebuilt. Bumping is still a one-line change, but it changes the *pair*, and the pair
+is what validation certified. *(Decisions D8 + new D9 below.)*
+
+## 9c. Embedding operations (don't mistake "first green link" for "shippable")
+
+Pass-3 reviewers both flagged that from-source V8 efforts stall *after* the first
+successful link, on operational details. Plan these up front:
+
+- **Snapshot / startup data:** we embed (`v8_use_external_startup_data=false`), so no
+  loose `.bin` — validate the embedded snapshot actually initializes.
+- **Runtime init order:** the consumer must init in the right order — `v8::Platform`
+  (libplatform) → ICU (if i18n-on) → `V8::Initialize` → `ArrayBuffer::Allocator` →
+  isolate. Document it; the validation fixture must exercise exactly this order.
+- **Pointer-compression / sandbox cage:** `V8_COMPRESS_POINTERS` / `V8_ENABLE_SANDBOX`
+  defines **must match** between our build and the consumer TU or it's silent UB
+  (D3). The Pulp-shaped compile check enforces this.
+- **Binary size budget:** record per-platform artifact + linked-size delta in
+  `manifest.json`; V8 is ~1 MB+ and i18n adds ~10 MB ICU data. Set a budget so a
+  regression is visible.
+- **Debug symbols:** decide whether to ship stripped + a separate symbol artifact
+  (`.dSYM`/`.pdb`/split-debug) for crash triage.
+- **License / SBOM:** V8, ICU, zlib, and depot_tools deps have obligations —
+  generate an SBOM + bundled license file per release.
+- **Security / update cadence:** V8 ships security fixes frequently. Define a bump
+  policy (how often we re-pin, how fast we can cut a patched release) so we're not
+  stuck on a vulnerable V8.
 
 ## 10. Decisions to settle (flag for Oli / review)
 
@@ -435,6 +586,10 @@ a version. *(Decision D8 below: lock the exact tag string format.)*
   OS/arch (Apple-silicon Linux VM? Windows-capable?) so we know which validation
   targets it can host vs. which must stay on stock GitHub runners. Validation runs
   on **both** before a platform is declared validated.
+- **D9 — Pair lockfile vs independent tags.** Does Pulp consume a validated
+  `{skia_sha256, v8_sha256, validated_pair_id}` lockfile (reproducible, proven
+  pairing) or two independent tags (simpler, but a rebuilt-Skia-same-branch can
+  silently break the pairing)? Recommend the lockfile.
 - **D8 — Exact release-tag format & milestone source of truth.** Lock the tag
   string (proposed `mNNN-v8-<version>`), and decide where the canonical
   `mNNN → V8 version` mapping lives (pinned chromiumdash lookup committed to the
@@ -452,11 +607,18 @@ Reordered after pass 2: the requester's bar is **Linux/Windows** confidence, so 
 prove the cross-link and the new platforms early rather than spending two phases on
 macOS first.
 
-1. **Phase 0 — build the validation harness + positive/negative controls** and
-   settle the single-library question (§9). Prove the harness *fails* on an
-   unsealed V8 (negative control) and *passes* on a known-good combo (positive
-   control) before trusting any green. Pick one platform to bring up first here
-   (macOS arm64 is the cheapest place to debug the sealing recipe).
+0. **Phase 0 — build the validation harness + positive/negative controls FIRST**,
+   settle static-vs-shared (D5) and the single-library question (§9), and spike the
+   ICU-rename candidate (§6b). The harness must **fail on an unsealed V8** (negative
+   control) and on a **QuickJS-substituted** binary (engine-identity control), and
+   **pass on a known-good combo** — *before* any green is trusted. macOS arm64 is the
+   cheapest place to debug the sealing recipe, but treat compiling V8 as the easy
+   part, not as progress.
+0b. **Phase 0b — Windows i18n-off thin vertical slice, EARLY.** Don't wait for
+   mac/linux polish: build V8 (i18n-off), compile Pulp's V8 TU, link a minimal
+   Pulp-shaped app, run the identity-anchored harness on Windows. Windows is the most
+   likely place the *product shape* (APIs, flags, packaging, CRT) bites — prove it
+   can carry the product before investing in the harder lanes.
 2. **Phase 1 — Linux x64, i18n-on, sealed.** First *new* validated provider; the
    single-object internalization recipe gets proven on the platform we care about.
 3. **Phase 2 — macOS arm64 + x86_64 + universal**, then flip Pulp's default off
@@ -502,7 +664,21 @@ macOS first.
   **Linux and Windows-i18n-off come early** (§11); decide Pulp-specific vs general
   artifact (D7); pin runner images (§7).
 
+- **Pass 3 — adversarial (Codex `gpt-5.5` + RepoPrompt oracle), 2026-06-03.**
+  Codex: (1) **premise may be overbuilt** — static V8 only justified if Linux/Windows
+  V8 truly ships; reconsider a controlled shared-lib/libnode-style boundary (§1b);
+  (2) **screenshots can lie** (SwiftShader/null-adapter/CPU-Skia/QuickJS-fallback) →
+  harness must assert engine + backend **identity**, not pixels (§8); (3) §9b
+  milestone pairing is **traceability, not a technical guarantee** — sealing is the
+  real fix; (4) local-mac proof is the *least* representative; (5) biggest waste =
+  treating "compiled V8" as progress. Oracle: keep repos separate but share a
+  contract (§3); manifest must pin exact DEPS/SHAs + a pair-lockfile (§9b); run the
+  Pulp-shaped + screenshot harness on **all three OSes** (§8); add **Embedding
+  operations** (§9c); move a **Windows thin slice early** (§11); `seal/` as
+  policy+backends (§3). Added §6b honest per-platform solution status.
+
 ---
 
-*Revised after Codex (pass 1) and RepoPrompt oracle (pass 2). Ready for discussion
-with the requester. Open decisions D1–D7 below need owner input before Phase 0.*
+*Revised after Codex (pass 1), RepoPrompt oracle (pass 2), and an adversarial pass 3
+(both). Open decisions D1–D9 need owner input before Phase 0. Companion runbook:
+`planning/v8-builder-runbook.md`.*
