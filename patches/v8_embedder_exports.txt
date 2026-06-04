@@ -1,0 +1,7 @@
+__ZN2v8*
+__ZNK2v8*
+__ZTVN2v8*
+__ZTIN2v8*
+__ZTSN2v8*
+__ZN6cppgc*
+__ZNK6cppgc*

@@ -45,7 +45,7 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P0.4 | Settle static-vs-shared spike (D5) + single-lib (§9) | DONE | shared, i18n-on (settled 2026-06-03) |
 | P1a | build-v8.py pipeline + seal/macho.py | DONE | depot_tools/fetch/sync/gn/ninja + dylib seal (force_load + exported_symbols_list, nm audit) |
 | P1b | Build v8_monolith from source (mac arm64, V8 15.1) | DONE ✅ | native 298M Mach-O arm64, 257k syms, contains absl(2645)/icu/zlib to seal. Fix: is_official_build=false (avoids ThinLTO + force-hidden new/delete SDK clash). Codex root-caused. |
-| P1c | seal v8_monolith → libv8.dylib (only v8::/cppgc::) | WIP | V8 15.1 monolith NOT self-contained (Rust Temporal → ~56 rlibs + local_rustc_sysroot). String-surgery on hello_world link hit ninja .rsp + dead_strip dead-ends → delegated to codex-rescue to add a gn shared_library target (computes rsp/rust-closure/linker_driver correctly). |
+| P1c | seal v8_monolith → libv8.dylib (only v8::/cppgc::) | DONE ✅ | gn v8_shared_library target (patches/v8-15.1-sealed-shared-gn.patch) deps :v8_monolith, force_load + -exported_symbols_list, remove dead_strip. **libv8.dylib 76M; nm -gU: 0 absl/icu/zlib internals exported, 68k v8 syms, V8::Initialize present.** Seal verified. |
 | P1d | Validate sealed-from-source V8 ⟷ Dawn (no link flag) | TODO | replace libnode w/ our sealed dylib, run identity gate |
 | P0b.1 | Windows shared-lib slice: build + Pulp link + harness | TODO | cheapest-first proof of product shape |
 | P1.1 | Linux x64 shared lib, sealed, i18n-on | TODO | match real Skia STL (libstdc++) |

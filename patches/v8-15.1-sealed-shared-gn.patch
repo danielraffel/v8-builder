@@ -1,0 +1,40 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 167d9a9003..2a01e17ae0 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -7904,6 +7904,35 @@ if (v8_monolithic) {
+ 
+     configs = [ ":internal_config" ]
+   }
++
++  if (is_mac) {
++    v8_shared_library("v8_sealed_shared") {
++      output_name = "v8"
++      sources = []
++      inputs = [ "v8_embedder_exports.txt" ]
++
++      deps = [ ":v8_monolith" ]
++
++      configs = [ ":internal_config_base" ]
++      if (v8_force_optimize_speed ||
++          (((is_posix && !is_android) || is_win) && !using_sanitizer)) {
++        remove_configs = [ "//build/config/compiler:optimize_speed" ]
++      } else if (is_debug && !v8_optimized_debug) {
++        remove_configs = [ "//build/config/compiler:no_optimize" ]
++      } else {
++        remove_configs = [ "//build/config/compiler:optimize_max" ]
++      }
++
++      ldflags = [
++        "-Wl,-exported_symbols_list," +
++            rebase_path("v8_embedder_exports.txt", root_build_dir),
++        "-Wl,-install_name,@rpath/libv8.dylib",
++        "-Wl,-force_load," +
++            rebase_path("$root_build_dir/obj/libv8_monolith.a",
++                        root_build_dir),
++      ]
++    }
++  }
+ }
+ 
+ if (v8_enable_webassembly) {
