@@ -39,6 +39,19 @@ both from these SHAs and prove Pulp's ABI/build model consumes them cleanly" is 
 real next step — not just reading the SHAs. **Acceptance: we already prove SHA
 generation (done); proving a clean co-built bundle is the open work.**
 
+**Shared release-manifest contract (both repos return similar data).** For Pulp to
+pair them, **skia-builder and v8-builder releases must each emit the same manifest
+fields** describing what they were built from, e.g.:
+```json
+{ "source": "chromium-lkgr-deps", "chromium_deps_blob": "<sha>",
+  "skia": "<sha>", "v8": "<sha>", "dawn": "<sha>",
+  "this_artifact": "v8|skia", "built_revision": "<the sha THIS release built>" }
+```
+Then Pulp reads either release's manifest and confirms they reference the **same
+LKGR set** (same skia/v8/dawn SHAs) before pairing — a machine-checkable co-tested
+guarantee, not a naming convention. (This is the cross-repo "shared contract" from
+proposal §3, extended to carry the LKGR triple.)
+
 **Dependency it creates:** keeping skia-builder fork + v8-builder regenerating
 regularly and in sync against LKGR — which motivates FR2.
 
