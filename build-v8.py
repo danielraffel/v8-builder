@@ -63,9 +63,14 @@ def common_gn_args():
     ]
 
 
+# Map our arch labels (skia-builder convention) to V8 gn target_cpu values.
+def gn_cpu(arch):
+    return {"x86_64": "x64", "x64": "x64", "arm64": "arm64"}.get(arch, arch)
+
+
 def mac_gn_args(arch):
     return common_gn_args() + [
-        f'target_cpu="{arch}"',                 # arm64 | x64
+        f'target_cpu="{gn_cpu(arch)}"',         # arm64 | x64 (x86_64 -> x64)
         'target_os="mac"',
         'mac_deployment_target="11.0"',         # match Pulp/Skia (macOS 11+)
         # macOS system libc++ is modern (C++20-complete) AND matches Skia's STL,
@@ -76,7 +81,7 @@ def mac_gn_args(arch):
 
 def linux_gn_args(arch):
     return common_gn_args() + [
-        f'target_cpu="{arch}"',                 # x64 | arm64
+        f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
         'target_os="linux"',
         # D2b RESOLVED (CI finding 2026-06-04): do NOT force use_custom_libcxx=false
         # on Linux — Chromium's bundled debian-bullseye sysroot libstdc++ is too old
