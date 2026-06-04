@@ -37,7 +37,7 @@ validate/              # cross-link proof: V8 + Skia/Dawn in one binary
 planning/              # proposal + runbook (authoritative)
 ```
 
-## Consuming from Pulp / iPlug
+## Consuming from Pulp
 
 Through Pulp's existing provider contract (`core/view/CMakeLists.txt`):
 `-DPULP_JS_ENGINE=v8 -DV8_INCLUDE_DIR=… -DV8_LIB_DIR=… -DV8_LIBRARY_PATH=…`.

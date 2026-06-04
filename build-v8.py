@@ -72,6 +72,65 @@ def mac_gn_args(arch):
     ]
 
 
+def linux_gn_args(arch):
+    return common_gn_args() + [
+        f'target_cpu="{arch}"',                 # x64 | arm64
+        'target_os="linux"',
+        # ABI: match the real Skia Linux build's STL (proposal §5/D2b: likely
+        # libstdc++ since Skia doesn't set use_custom_libcxx). VALIDATE on CI before
+        # trusting — this is the highest Linux ABI risk and is unprovable on macOS.
+    ]
+
+
+def platform_gn_args(platform, arch):
+    if platform == "mac":
+        return mac_gn_args(arch)
+    if platform == "linux":
+        return linux_gn_args(arch)
+    raise SystemExit(f"gn args for platform '{platform}' not implemented "
+                     "(Windows DLL seal is a separate lane — see seal/coff_research.md)")
+
+
+# Injected into V8's BUILD.gn. Proven on macOS (P1c); the ELF branch is the Linux
+# analog (version-script + --whole-archive), validated on CI (unprovable on macOS).
+SEAL_TARGET_GN = '''\
+# >>> v8-builder sealed-shared target (injected)
+if ((is_mac || is_linux) && v8_monolithic) {
+  v8_shared_library("v8_sealed_shared") {
+    output_name = "v8"
+    sources = []
+    deps = [ ":v8_monolith" ]
+    configs = [ ":internal_config_base" ]
+    if (v8_force_optimize_speed ||
+        (((is_posix && !is_android) || is_win) && !using_sanitizer)) {
+      remove_configs = [ "//build/config/compiler:optimize_speed" ]
+    } else if (is_debug && !v8_optimized_debug) {
+      remove_configs = [ "//build/config/compiler:no_optimize" ]
+    } else {
+      remove_configs = [ "//build/config/compiler:optimize_max" ]
+    }
+    if (is_mac) {
+      inputs = [ "v8_embedder_exports.txt" ]
+      ldflags = [
+        "-Wl,-exported_symbols_list," + rebase_path("v8_embedder_exports.txt", root_build_dir),
+        "-Wl,-install_name,@rpath/libv8.dylib",
+        "-Wl,-force_load," + rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
+      ]
+    } else {
+      inputs = [ "v8_embedder_exports.map" ]
+      ldflags = [
+        "-Wl,--version-script=" + rebase_path("v8_embedder_exports.map", root_build_dir),
+        "-Wl,-soname,libv8.so",
+        "-Wl,--whole-archive",
+        rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
+        "-Wl,--no-whole-archive",
+      ]
+    }
+  }
+}
+'''
+
+
 class Colors:
     OK = '\033[92m'; WARN = '\033[93m'; FAIL = '\033[91m'; END = '\033[0m'
 
@@ -115,34 +174,51 @@ class V8Build:
         run(["gclient", "sync", "-D", "--force", "--reset",
              f"--revision=src/v8@refs/tags/{self.tag}"], cwd=SRC_DIR, env=self.env)
 
+    # The seal is an IN-TREE gn shared_library target (proven on macOS, P1c): it deps
+    # :v8_monolith and lets gn compute V8 15.1's full Rust-Temporal + system link
+    # closure, emitting a dylib/so that exports ONLY v8::/cppgc:: (force_load monolith +
+    # -exported_symbols_list on Mach-O / --version-script on ELF). The earlier
+    # standalone-clang seal could NOT do this (it can't reconstruct the Rust closure).
+    SEAL_MARKER = "# >>> v8-builder sealed-shared target (injected)"
+
+    def inject_seal_target(self):
+        build_gn = V8_DIR / "BUILD.gn"
+        text = build_gn.read_text()
+        if self.SEAL_MARKER in text:
+            say("seal target already injected")
+        else:
+            # export lists in V8 root (Mach-O patterns + ELF version script)
+            (V8_DIR / "v8_embedder_exports.txt").write_text(
+                "\n".join(["__ZN2v8*", "__ZNK2v8*", "__ZTVN2v8*", "__ZTIN2v8*",
+                           "__ZTSN2v8*", "__ZN6cppgc*", "__ZNK6cppgc*"]) + "\n")
+            run([sys.executable, str(SEAL_DIR / "elf.py"), "version-script",
+                 "--out", str(V8_DIR / "v8_embedder_exports.map")], env=self.env)
+            build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n")
+            say("injected v8_sealed_shared gn target")
+
     def gn_gen(self, arch):
         out = V8_DIR / "out" / f"{self.args.platform}-{arch}"
-        args_gn = "\n".join(mac_gn_args(arch)) + "\n"
+        args_gn = "\n".join(platform_gn_args(self.args.platform, arch)) + "\n"
         out.mkdir(parents=True, exist_ok=True)
         (out / "args.gn").write_text(args_gn)
         say(f"args.gn:\n{args_gn}")
         run(["gn", "gen", str(out)], cwd=V8_DIR, env=self.env)
         return out
 
-    def ninja(self, out):
-        run(["ninja", "-C", str(out), "v8_monolith"], cwd=V8_DIR, env=self.env)
-        lib = out / "obj" / "libv8_monolith.a"
+    def build_sealed(self, out, arch):
+        run(["ninja", "-C", str(out), "v8_sealed_shared"], cwd=V8_DIR, env=self.env)
+        libname = "libv8.dylib" if self.args.platform == "mac" else "libv8.so"
+        lib = out / libname
         if not lib.exists():
-            raise SystemExit(f"expected {lib} not produced")
-        return lib
-
-    def seal(self, monolith, arch):
-        if self.args.no_seal:
-            say("--no-seal: skipping seal step", Colors.WARN)
-            return monolith
+            raise SystemExit(f"expected sealed {lib} not produced")
+        dest = BUILD_DIR / f"{self.args.platform}-{arch}" / "lib"
+        dest.mkdir(parents=True, exist_ok=True)
+        run(["cp", str(lib), str(dest / libname)])
+        # audit: assert 0 absl/icu/zlib internals exported
         backend = SEAL_DIR / ("macho.py" if self.args.platform == "mac" else "elf.py")
-        out_dylib = BUILD_DIR / f"{self.args.platform}-{arch}" / "lib" / "libv8.dylib"
-        out_dylib.parent.mkdir(parents=True, exist_ok=True)
-        run([sys.executable, str(backend), "seal",
-             "--monolith", str(monolith),
-             "--out", str(out_dylib),
+        run([sys.executable, str(backend), "audit", "--lib", str(dest / libname),
              "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
-        return out_dylib
+        return dest / libname
 
     def package(self, sealed, arch):
         dest = BUILD_DIR / f"{self.args.platform}-{arch}"
@@ -164,20 +240,23 @@ class V8Build:
         say(f"packaged {dest}")
 
     def run_all(self):
-        if self.args.platform != "mac":
-            raise SystemExit("Only the macOS lane is implemented so far (Phase 1). "
-                             "Linux/Windows land in later phases.")
-        archs = (self.args.archs or "arm64").split(",")
+        # mac is proven (P1d). linux is implemented and validates on a Linux CI runner
+        # (unprovable on a macOS host). Windows DLL seal is a separate lane (coff).
+        if self.args.platform == "win":
+            raise SystemExit("Windows DLL-export seal is a separate lane — see "
+                             "seal/coff_research.md; not wired into build-v8.py yet.")
+        default_arch = {"mac": "arm64", "linux": "x64"}[self.args.platform]
+        archs = (self.args.archs or default_arch).split(",")
         self.setup_depot_tools()
         self.fetch_v8()
         if not self.args.use_synced:
             self.sync_v8()
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
+        self.inject_seal_target()
         for arch in archs:
             out = self.gn_gen(arch)
-            monolith = self.ninja(out)
-            sealed = self.seal(monolith, arch)
+            sealed = self.build_sealed(out, arch)
             self.package(sealed, arch)
         say("done", Colors.OK)
 

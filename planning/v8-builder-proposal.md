@@ -3,14 +3,14 @@
 **Status:** Draft v1 (pre-review). Will be revised after 2 review passes (Codex + RepoPrompt oracle).
 **Author:** Daniel + Claude
 **Date:** 2026-06-03
-**Audience:** Oli (skia-builder author) + Pulp/iPlug maintainers
+**Audience:** Oli (skia-builder author) + Pulp maintainers
 
 ---
 
 ## 1. Goal
 
 Build **standalone, redistributable V8 (`v8_monolith`) static libraries** for the
-platforms/architectures Pulp and iPlug need, on GitHub Actions, triggered the
+platforms/architectures Pulp needs, on GitHub Actions, triggered the
 same way `skia-builder` is, and published as **tagged releases with per-platform /
 per-arch artifacts** — so that a from-source V8 can link cleanly *next to Skia
 Graphite + Dawn* in a single binary.
@@ -243,7 +243,7 @@ files and use exactly that set, so the seal can never drop something the consume
 needs.
 
 > **Audience decision (pass 2) — D7.** Scraping *only* Pulp's current undefined
-> symbols yields a **Pulp-specific** binary: iPlug, or a future choc/Pulp change,
+> symbols yields a **Pulp-specific** binary: a future choc/Pulp change,
 > could need a symbol we localized. If we want a **general** V8 embedder artifact,
 > build the keep-list from V8's public ABI surface (`v8::` + `v8::platform` +
 > `cppgc::`) and use Pulp's scraped set only as a *completeness check*, not the
@@ -449,7 +449,7 @@ Tart runner's exact OS/arch coverage and whether it can host Windows — see D6.
 > refuses to release otherwise. That is the only honest basis for "extreme
 > confidence" on Linux/Windows.
 
-## 9. Artifact + consumer contract (Pulp / iPlug)
+## 9. Artifact + consumer contract (Pulp)
 
 Each release asset `v8-build-<platform>-<arch>-release.zip` contains:
 
