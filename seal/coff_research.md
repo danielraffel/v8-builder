@@ -102,13 +102,27 @@ deps copy. My synthetic repro + gn-order analysis were done with **Temporal OFF*
 with no Rust closure, whole-archive-first IS clean. **With the Rust closure ON, the link
 graph changes** (the rlibs / rust integration create monolith refs that get satisfied from
 the plain deps archive in addition to the whole-archive copy) and the duplicate returns.
-**Net: the seal target DOES still need a fix** (candidates below / the `whole_archive.py`
-LinkWrapper). The bug is now **faithfully reproduced on CI** — so CI (≈1h) or a **Tart
-x86_64 Linux VM on the Mac Studio** (bundled toolchain runs natively-in-emulation) is the
-loop to fix it on. Lead fix: reference the monolith **exactly once**, whole-archived, while
-still pulling the Rust closure — via Chromium's blessed `-LinkWrapper,add-whole-archive`
-(`build/toolchain/whole_archive.py`) rather than hand-rolled `--whole-archive` ldflags that
-race the deps-emitted monolith. Re-examine candidate #1 on the faithful loop.
+### DEFINITIVE ROOT CAUSE (2026-06-04, from reading the toolchain): DOUBLE whole-archive
+Reading `build/toolchain/gcc_toolchain.gni` `tool("solink")` settles it. On Linux (the
+non-aix, non-mipsel branch, line ~505) the rule's rspfile is:
+```
+rspfile_content = "-Wl,--whole-archive {{inputs}} {{solibs}} -Wl,--no-whole-archive {{libs}}"
+```
+i.e. **the solink rule ALREADY whole-archives `{{inputs}}`.** Our target does
+`deps=[":v8_monolith"]`, which puts `obj/libv8_monolith.a` into `{{inputs}}` → it is
+whole-archived ONCE by the rule, in place, and the Rust closure is appended as `{{rlibs}}`.
+Our hand-rolled `-Wl,--whole-archive obj/libv8_monolith.a -Wl,--no-whole-archive` in
+`ldflags` whole-archived the **same archive a SECOND time** → lld included every member
+twice (it doesn't dedup) → the `duplicate symbol` failure. It was NOT an ordering problem;
+the Temporal-OFF synthetic only whole-archived once, which is why it looked clean.
+
+**FIX (applied to build-v8.py SEAL_TARGET_GN, ELF branch):** delete the hand-rolled
+`--whole-archive`/monolith-path/`--no-whole-archive` ldflags; keep only the version-script
++ soname. `deps=[:v8_monolith]` + the rule's built-in `{{inputs}}` whole-archive do the
+rest, and `{{rlibs}}` still carries the Rust closure. (Mach-O differs: ld64 needs explicit
+`-force_load` and dedups, so the mac branch is unchanged.) Validating on CI on branch
+`linux-seal-fix`. The `-LinkWrapper,add-whole-archive` mechanism is unnecessary — the
+default solink rule already does the right thing once we stop double-wrapping.
 
 ## ELF seal — (earlier, Temporal-OFF analysis; see CORRECTION above)
 

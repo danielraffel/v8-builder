@@ -49,6 +49,15 @@ def common_gn_args():
         'is_official_build=false',
         'is_debug=false',
         'v8_monolithic=true',
+        # The monolith is destined for a SHARED library (D5 flagship), so build it
+        # the way V8 builds its own shared/component lib: this gn arg defines
+        # V8_TLS_USED_IN_LIBRARY, which switches V8's hot-path thread_locals
+        # (g_current_isolate_, g_current_local_heap_) from the exe-only "local-exec"
+        # TLS model to the PIC-safe "local-dynamic" model + a hidden non-inline getter.
+        # Without it, linking the monolith into `-shared` fails on ELF/lld with
+        # `relocation R_X86_64_TPOFF32 ... cannot be used with -shared` (CI 26965278162).
+        # Its ONLY effect (BUILD.gn:1257) is that define — no visibility/export change.
+        'v8_monolithic_for_shared_library=true',
         'v8_use_external_startup_data=false',
         'v8_enable_i18n_support=true',          # D2: Intl ON
         'use_rtti=false',                       # match Skia -fno-rtti
@@ -83,13 +92,28 @@ def linux_gn_args(arch):
     return common_gn_args() + [
         f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
         'target_os="linux"',
-        # D2b RESOLVED (CI finding 2026-06-04): do NOT force use_custom_libcxx=false
-        # on Linux — Chromium's bundled debian-bullseye sysroot libstdc++ is too old
-        # for C++20 (no std::bit_cast / <source_location>) and V8 fails to compile.
-        # In the sealed-SHARED model V8 shares no C++ types with Skia (serialized
-        # boundary) and its libc++ is hidden by the seal, so V8 uses its OWN bundled
-        # libc++ (the default) — exactly like it bundles its own absl/icu. Skia keeps
-        # libstdc++; the two coexist because nothing STL crosses the boundary.
+        # D2b REVISED (2026-06-04): build with the PLATFORM C++ ABI (system libstdc++),
+        # NOT Chromium's bundled libc++. V8's public API exposes std types
+        # (e.g. v8::platform::NewDefaultPlatform(..., std::unique_ptr<...>, ...)); the
+        # bundled libc++ mangles std:: with Chromium's `__Cr` ABI namespace
+        # (_LIBCPP_ABI_NAMESPACE=__Cr), so a consumer built with system libstdc++ gets
+        # undefined-reference at link (verified on a real x86_64 link). That makes the
+        # .so non-drop-in. Node ships libnode against the system libstdc++ (RHEL-8
+        # baseline, glibc>=2.28) for exactly this reason — Node-API is the C ABI; the
+        # direct C++ API uses the platform ABI. So: use the HOST's modern toolchain
+        # (use_sysroot=false fixes the old-bullseye-sysroot C++20 gap that drove D2b's
+        # earlier bundled-libc++ choice) with standard libstdc++. The export SEAL is
+        # unchanged (ICU/zlib/Abseil stay internal). Release portability (old-glibc
+        # floor) wants a RHEL/Rocky-8 build image — tracked as a follow-up; ubuntu-24.04
+        # CI is fine to validate the ABI is consumable.
+        'use_sysroot=false',
+        'use_custom_libcxx=false',
+        'use_custom_libcxx_for_host=false',
+        # use_sysroot=false makes gn resolve system libs via pkg-config; V8 standalone
+        # does NOT need glib (it's a Chromium-UI default), so turn it off rather than
+        # require libglib2.0-dev on the build host. V8 monolith otherwise needs only
+        # libc/libstdc++/libm, present on any modern Linux.
+        'use_glib=false',
     ]
 
 
@@ -128,13 +152,19 @@ if ((is_mac || is_linux) && v8_monolithic) {
         "-Wl,-force_load," + rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
       ]
     } else {
+      # ELF: do NOT hand-roll --whole-archive on the monolith. Chromium's `solink`
+      # rule (build/toolchain/gcc_toolchain.gni) ALREADY wraps {{inputs}} in
+      # `-Wl,--whole-archive {{inputs}} -Wl,--no-whole-archive` on Linux (the non-aix,
+      # non-mipsel branch). Since `deps=[:v8_monolith]` puts libv8_monolith.a in
+      # {{inputs}}, the rule whole-archives it ONCE, in place — and appends the Rust
+      # closure as {{rlibs}} after. A second hand-rolled --whole-archive of the same
+      # archive makes lld include every member TWICE (it does not dedup) → the
+      # duplicate-symbol failure seen in CI run 26961155381. So: just deps + the
+      # version-script. (Mach-O differs: ld64 needs explicit -force_load and dedups.)
       inputs = [ "v8_embedder_exports.map" ]
       ldflags = [
         "-Wl,--version-script=" + rebase_path("v8_embedder_exports.map", root_build_dir),
         "-Wl,-soname,libv8.so",
-        "-Wl,--whole-archive",
-        rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
-        "-Wl,--no-whole-archive",
       ]
     }
   }

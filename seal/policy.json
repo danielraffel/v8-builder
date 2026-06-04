@@ -17,7 +17,7 @@
   ],
   "audit": {
     "_comment_absl": "P0.3a finding (2026-06-03): libnode flat-exports 558 absl symbols and Dawn carries 3212; two Abseil copies in one binary => raw_hash_set PerTableSeed ODR abort. Sealing MUST cover Abseil (and likely protobuf), not just ICU/zlib. libnode does NOT seal absl, so it is not a clean coexistence provider with Dawn.",
-    "must_be_zero_global": ["ubrk_", "ucnv_", "uloc_", "u_", "inflate", "deflate", "_ZN4absl", "absl"],
+    "must_be_zero_global": ["ubrk_", "ucnv_", "uloc_", "u_", "inflate", "deflate", "_ZN4absl", "absl", "_ZN6icu_", "_ZN6icu"],
     "must_be_present": ["v8::V8::Initialize", "v8::Isolate::New"],
     "pulp_completeness_check": "scrape undefined v8::/cppgc:: from Pulp's js_v8_engine.cpp + choc wrapper; the export set MUST be a superset (completeness check only, never a narrowing)"
   }
