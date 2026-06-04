@@ -47,14 +47,14 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P1b | Build v8_monolith from source (mac arm64, V8 15.1) | DONE ✅ | native 298M Mach-O arm64, 257k syms, contains absl(2645)/icu/zlib to seal. Fix: is_official_build=false (avoids ThinLTO + force-hidden new/delete SDK clash). Codex root-caused. |
 | P1c | seal v8_monolith → libv8.dylib (only v8::/cppgc::) | DONE ✅ | gn v8_shared_library target (patches/v8-15.1-sealed-shared-gn.patch) deps :v8_monolith, force_load + -exported_symbols_list, remove dead_strip. **libv8.dylib 76M; nm -gU: 0 absl/icu/zlib internals exported, 68k v8 syms, V8::Initialize present.** Seal verified. |
 | P1d | Validate sealed-from-source V8 ⟷ Dawn (no link flag) | DONE ✅✅ | **GOAL PROVEN (macOS arm64):** Pulp demo links OUR @rpath/libv8.dylib (not libnode), no link-flag hack. Identity gate PASS: engine=v8, runtime_version=15.1.0 (our build), Metal hardware, real Three.js cube rendered (1640×1120 PNG). Abseil collision gone by construction; pointer-compression aligned OFF (D3). choc compiles clean vs V8 15.1 with the existing patch. |
-| P0b.1 | Windows shared-lib slice: build + Pulp link + harness | TODO | cheapest-first proof of product shape |
-| P1.1 | Linux x64 shared lib, sealed, i18n-on | TODO | match real Skia STL (libstdc++) |
-| P1.2 | Linux validation: forced-collision + identity harness | TODO | |
+| P0b.1 | Windows lane | BLOCKED | needs a Windows runner (Tart/GitHub) — cannot build/run on this macOS host. Lane + DLL-export seal approach documented (seal/coff_research.md). Gated on CI/public-repo go. |
+| P1.1 | Linux x64 sealed shared .so | BLOCKED | needs a Linux runner — cannot build/run here. gn args + seal/elf.py (version-script) written; needs a linux v8_shared_library gn target (analog of the proven mac one) + first CI run. Gated on CI/public-repo go. |
+| P1.2 | Linux validation (forced-collision + identity) | BLOCKED | runs on Linux CI via validate/ + build-v8.yml (now a real pipeline). Gated on CI/public-repo go. |
 | P2.1 | macOS shared lib (arm64, x86_64, universal), sealed | TODO | |
 | P2.2 | macOS A/B: ours vs Homebrew libnode through Pulp | TODO | identity proves the swap is real |
 | P2.3 | Flip Pulp default off libnode (D4) | TODO | only after A/B green |
-| P3.1 | Windows i18n-on DLL (export-table seal) | TODO | |
-| P4.1 | CI: build-v8.yml + validate-v8.yml, all-3-OS harness | TODO | pinned runners, validate-all gate |
+| P3.1 | Windows DLL (export-table seal) | BLOCKED | Windows runner required. Gated on CI/public-repo go. |
+| P4.1 | CI: build-v8.yml + validate-v8.yml | READY | build-v8.yml now invokes the real build-v8.py + forced-collision validator per OS (exact platform parsing, pinned runners). Needs repo pushed to run. Gated on PUB go. |
 | P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
 | PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
 

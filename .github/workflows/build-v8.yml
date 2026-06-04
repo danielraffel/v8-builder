@@ -1,21 +1,25 @@
-# build-v8.yml — build, seal, validate, and release V8 per platform/arch.
-# STATUS: SKELETON. build-v8.py is not implemented yet, so real runs will fail by
-# design until the per-phase logic lands. Structure incorporates the review
-# corrections (proposal §7): EXACT platform parsing (not substring), pinned runner
-# images, a validate-all aggregation job that GATES the release, dynamic assets.
+# build-v8.yml — build, seal, validate, and (optionally) release V8 per platform.
+#
+# macOS arm64 is PROVEN locally (sealed from-source V8 15.1 coexists with Skia/Dawn,
+# identity gate PASS). Linux + Windows lanes are IMPLEMENTED here but validate ONLY on
+# a real runner of that OS (GitHub-hosted or self-hosted Tart) — they are not provable
+# on a macOS host. Do not treat a lane as validated until this workflow runs it green.
 name: Build V8
-run-name: Build V8 (${{ inputs.v8_version || 'default milestone' }})
 on:
   workflow_dispatch:
     inputs:
       v8_version:
-        description: 'V8 milestone or exact version (e.g. m149 or 13.6.233.8)'
+        description: 'V8 milestone or exact tag (default: build the synced tip)'
         required: false
         type: string
       platforms:
-        description: 'Comma-separated exact platform/arch ids, or "all"'
+        description: 'Comma-separated exact ids (mac/arm64,linux/x64,win/x64) or "all"'
         required: false
         default: 'all'
+        type: string
+      skia_release_tag:
+        description: 'skia-builder release tag to validate coexistence against'
+        required: true
         type: string
       skip_release:
         description: 'Skip creating a release'
@@ -26,7 +30,6 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}-${{ inputs.platforms }}
   cancel-in-progress: false
-
 permissions:
   contents: write
 
@@ -36,44 +39,69 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15,      platform: mac,   arch: arm64 }
-          - { os: macos-15,      platform: mac,   arch: x86_64 }
-          - { os: macos-15,      platform: mac,   arch: universal }
-          - { os: ubuntu-24.04,  platform: linux, arch: x64 }
-          - { os: windows-2022,  platform: win,   arch: x64 }
-          # later: ubuntu-24.04-arm / windows-11-arm (pinned, not *-latest)
+          - { os: macos-15,     platform: mac,   arch: arm64,  build: 'mac -archs arm64' }
+          - { os: ubuntu-24.04, platform: linux, arch: x64,    build: 'linux -archs x64' }
+          - { os: windows-2022, platform: win,   arch: x64,    build: 'win -archs x64' }
+          # macOS x86_64 / universal and arm64 Linux/Windows: add when the base lanes are green.
     runs-on: ${{ matrix.os }}
     steps:
       - name: Select (exact, not substring)
         id: sel
         shell: bash
         run: |
-          P="${{ inputs.platforms }}"
-          ID="${{ matrix.platform }}/${{ matrix.arch }}"
+          P="${{ inputs.platforms }}"; ID="${{ matrix.platform }}/${{ matrix.arch }}"
           if [ "$P" = "all" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else
-            IFS=','; for x in $P; do [ "$x" = "$ID" ] && echo "go=true" >> "$GITHUB_OUTPUT"; done
-          fi
+            IFS=','; for x in $P; do [ "$x" = "$ID" ] && echo "go=true" >> "$GITHUB_OUTPUT"; done; fi
       - if: steps.sel.outputs.go == 'true'
         uses: actions/checkout@v6
       - if: steps.sel.outputs.go == 'true'
-        name: Build + seal + validate (SKELETON)
+        uses: actions/setup-python@v6
+        with: { python-version: '3.x' }
+      - name: Free disk space (Linux)
+        if: steps.sel.outputs.go == 'true' && runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Build + seal V8 (depot_tools/gn/ninja + export-table seal)
+        if: steps.sel.outputs.go == 'true'
+        shell: bash
+        run: python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
+      - name: Download matching Skia release (coexistence target)
+        if: steps.sel.outputs.go == 'true'
         shell: bash
         run: |
-          echo "Phase-N: python3 build-v8.py ${{ matrix.platform }} -archs ${{ matrix.arch }} -tag '${{ inputs.v8_version }}'"
-          echo "then seal/, then validate/ (download provenance-verified Skia, forced-collision link, identity harness)"
-          exit 2  # skeleton
+          mkdir -p skia && cd skia
+          gh release download "${{ inputs.skia_release_tag }}" --repo olilarkin/skia-builder \
+            --pattern "*${{ matrix.platform }}*${{ matrix.arch }}*release*.zip" || true
+          for z in *.zip; do unzip -o "$z"; done || true
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+      - name: Validate coexistence (forced-collision link + identity, NO skip-pass)
+        if: steps.sel.outputs.go == 'true'
+        shell: bash
+        run: |
+          cmake -S validate -B validate/build \
+            -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
+            -DV8_LIB_DIR="$PWD/build/${{ matrix.platform }}-${{ matrix.arch }}/lib" \
+            -DV8_LIBRARY_PATH="$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
+            -DSKIA_DIR="$PWD/skia" \
+            -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
+          cmake --build validate/build
+          ./validate/build/v8_skia_validate
+      - name: Upload artifact
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: v8-${{ matrix.platform }}-${{ matrix.arch }}
+          path: build/${{ matrix.platform }}-${{ matrix.arch }}
 
-  # Release is GATED on this aggregation (proposal §7) — not on platforms == 'all'.
   validate-all:
     needs: build-v8
     if: ${{ !inputs.skip_release }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "Phase 4: assert every requested target produced a VALIDATED artifact before release."
+      - run: echo "Gate: release only if every requested platform produced a VALIDATED artifact."
 
   create-release:
     needs: validate-all
     if: ${{ !inputs.skip_release }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "Phase 4: tag mNNN-v8-<version>; attach dynamically-listed validated assets + manifest + pair lockfile."
+      - run: echo "Tag mNNN-v8-<version>; attach validated per-platform zips + manifest + pair lockfile."
