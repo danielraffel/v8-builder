@@ -54,6 +54,11 @@ def common_gn_args():
         'use_custom_libcxx=false',              # match Skia's system libc++ (macOS)
         'use_rtti=false',                       # match Skia -fno-rtti
         'v8_enable_sandbox=false',              # D3: hold constant; assert in consumer TU
+        # D3 (verified via a V8 runtime fatal-check): the embedder (choc/Pulp, and
+        # libnode) compiles with pointer compression OFF, so the provider MUST match
+        # or V8::Initialize aborts with an embedder-vs-V8 mismatch. Keep OFF for
+        # drop-in parity. (V8 defaults this ON for 64-bit.)
+        'v8_enable_pointer_compression=false',
         'treat_warnings_as_errors=false',
         'symbol_level=1',
     ]
