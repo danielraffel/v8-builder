@@ -25,6 +25,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -65,34 +66,38 @@ def _exports(lib):
     raise SystemExit("[seal/coff] need llvm-readobj or dumpbin to read PE exports")
 
 
+def _is_v8(name):
+    # MSVC mangles a symbol's namespace chain right-to-left, terminating in `@v8@@` /
+    # `@cppgc@@` immediately before the type/calling-convention suffix. Only v8::/cppgc::
+    # are dllexport'd (V8_EXPORT), so on a PE export table this substring is sufficient
+    # to identify the legitimate surface (incl. v8::internal::, v8::platform::).
+    return "@v8@@" in name or "@cppgc@@" in name
+
+
 def audit(lib, policy_path):
-    pol = json.loads(Path(policy_path).read_text())
-    deny = pol["audit"]["must_be_zero_global"]
     exported = _exports(lib)
     if not exported:
         print(f"[seal/coff] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
         raise SystemExit(1)
-    # Substring match is robust for both bare C ICU/zlib names (u_*, inflate, ...)
-    # and MSVC-mangled C++ (Abseil mangles its namespace as `@absl@@`, ICU as
-    # `@icu_NN@`, so the bare 'absl'/'icu' tokens in the policy still match).
-    leaks = []
-    for d in deny:
-        hits = [s for s in exported if d in s]
-        if hits:
-            leaks.append((d, hits[:3]))
+    # ALLOW-LIST (primary, unfakeable): every export MUST be on the v8::/cppgc:: surface.
+    # Anything else — bare C ICU/zlib names (u_*, inflate), absl `?...@absl@@`, icu
+    # `?...@icu_NN@@` — is a seal leak. This is strictly stronger than a deny-list, which
+    # both misses internals it didn't name AND false-positives: a bare token like "u_"
+    # matches legit v8 names (cpU_duration@TraceObject@tracing@platform@v8, cpU_profiler).
+    leaks = [s for s in exported if not _is_v8(s)]
     if leaks:
-        print("[seal/coff] AUDIT FAIL — exported denied internals:", file=sys.stderr)
-        for d, ex in leaks:
-            print(f"   {d}: {' | '.join(ex)}", file=sys.stderr)
+        from collections import Counter
+        buckets = Counter()
+        for s in leaks:
+            m = re.search(r"@([A-Za-z_][A-Za-z0-9_]*)@@", s) or re.match(r"([A-Za-z_]+)", s)
+            buckets[m.group(1) if m else s[:16]] += 1
+        print(f"[seal/coff] AUDIT FAIL — {len(leaks)} non-v8/cppgc exports (seal leak). "
+              f"Top: {dict(buckets.most_common(6))}", file=sys.stderr)
+        for s in leaks[:5]:
+            print(f"   e.g. {s}", file=sys.stderr)
         raise SystemExit(1)
-    # MSVC mangles the v8 namespace as `@v8@@`; require the v8 surface is present.
-    v8n = sum(1 for s in exported if "@v8@@" in s or "@v8@" in s)
-    if v8n == 0:
-        print(f"[seal/coff] AUDIT FAIL — no v8 symbols exported "
-              f"(saw {len(exported)} exports)", file=sys.stderr)
-        raise SystemExit(1)
-    print(f"[seal/coff] AUDIT OK — 0 denied internal exports; "
-          f"{v8n} v8 exports of {len(exported)} total")
+    print(f"[seal/coff] AUDIT OK — {len(exported)} exports, all v8::/cppgc::; "
+          f"0 absl/icu/zlib leaks")
 
 
 # --- Fallback export mechanism: generate a .def from the monolith ----------
