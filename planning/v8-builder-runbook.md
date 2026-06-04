@@ -54,6 +54,43 @@ V8 15.1's bundled **clang (llvmorg-23) + Rust are x86_64-Linux-host ONLY** (`too
 ### Why move to Mac Studio + Tart
 More cores (faster V8 builds) and Tart can host **Windows + Linux VMs** (real Windows-lane iteration without GitHub round-trips) and possibly **x86_64 emulation** (so an emulated Intel VM runs V8's bundled clang/rust natively → unblocks Intel cells + ARM cells via cross/emulation). The QEMU+HVF loop used on the laptop (memory: `linux-vm-build-loop`) is the fallback; on Mac Studio prefer Tart.
 
+### STRATEGY DECISION (2026-06-04, Mac Studio session — Codex-confirmed)
+Resolved the "use x86_64 emulation if we can now" directive against the hard toolchain
+facts. **Tart = arm64 guests only** (Apple Virtualization.framework), and V8 15.1's
+bundled clang-23/Rust is **x86_64-host only** for every non-mac cell (ARM cells are
+*cross-compiled from an x86_64 host*). `qemu-user` already **segfaults** on the bundled
+clang-23, so the cross+qemu-user path is dead for faithful builds. Conclusions:
+- **GitHub CI native x86_64 (`ubuntu-24.04` / `windows-2022`) is the AUTHORITATIVE
+  faithful build loop** for all 4 non-mac cells (Linux x64/arm64-cross, Win x64/arm64-cross).
+  A clean V8 build there is ~1h; QEMU-system-TCG locally would be many hours and is NOT
+  worth tuning for full builds (Codex agreed — `ccache` helps rebuilds, not the first clean
+  2390-step build).
+- **Local Tart ARM VMs** = RUN/validate cross-built ARM artifacts at full speed + do audits
+  (`readelf --dyn-syms`, `dumpbin /exports`, `.def` design) — NOT the build farm.
+- **Rosetta-for-Linux = PROVEN viable (2026-06-04).** Apple Virtualization.framework's
+  Rosetta runs x86_64 binaries *inside* an arm64 Linux Tart VM (`tart run --rosetta`).
+  Verified on this Mac Studio: a static x86_64 binary runs (`uname -m` → `x86_64`) where
+  `qemu-user` segfaulted, AND **binfmt_misc auto-routing works** (canonical Lima/Docker
+  mask `…\xfe\xfe\x00\xff…\xfe\xff\xff\xff` + `F` flag — NOT a trailing-`\x00` mask, which
+  the 6.17 kernel rejects with EINVAL). So x86_64 ELFs invoked by path (ninja→bundled
+  clang-23/rustc/gn/cipd) transparently execute → a **fully automated faithful local Intel
+  V8 build is possible on the arm64 host**. Recipe:
+  `tart clone ghcr.io/cirruslabs/ubuntu:latest <vm>; tart set <vm> --disk-size 160 --cpu 16
+  --memory 32768; tart run <vm> --rosetta=rosetta`; in guest: `mount -t virtiofs rosetta
+  /mnt/rosetta` + register the binfmt entry. **PROVEN 2026-06-04: the bundled x86_64
+  clang-23 AND rustc EXECUTE under Rosetta** (`clang --version` → `Target:
+  x86_64-unknown-linux-gnu`; rustc runs) — qemu-user could not. Two non-obvious
+  requirements for DYNAMIC x86_64 binaries: (1) install amd64 multiarch runtime
+  (`libc6:amd64 libstdc++6:amd64 libgcc-s1:amd64 zlib1g:amd64 libtinfo6:amd64
+  libxml2:amd64` via an `archive.ubuntu.com` deb822 source — ports.ubuntu has no amd64) so
+  `/lib64/ld-linux-x86-64.so.2` exists; (2) on the arm64 host gclient installs the arm64
+  sysroot, so a `target_cpu="x64"` build needs `install-sysroot.py --arch=amd64`. gn is
+  fetched arm64-native; only clang/rustc/cipd go through Rosetta. A local Linux-x64 build
+  (V8 15.1.27, `linux-seal-fix`) is compiling now as an independent confirmation of the
+  seal fix alongside CI 26965278162. This is the local loop the handoff hoped for; CI stays
+  authoritative. (Full recipe + binfmt-lost-on-reboot caveat in memory
+  `rosetta-for-linux-x86-builds`.)
+
 ---
 
 > **Settled direction (2026-06-03):** flagship = **i18n ON + V8 as a SHARED library**

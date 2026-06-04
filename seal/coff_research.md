@@ -186,3 +186,51 @@ the seal recipe is now proven correct. That run is **owner-gated** (outward-faci
 The local loop remains available (system clang 18 + `v8_enable_temporal_support=false` +
 `use_sysroot=false`/`use_custom_libcxx=false`) for any future ELF seal-link iteration,
 which is all the synthetic repro needs anyway.
+
+---
+
+## Windows DLL-export seal — implementation plan (2026-06-04, Codex-vetted)
+
+Decision: **macro-export, NOT `.def`, NOT component build.** PE exports only
+`dllexport`/`.def`/`/EXPORT:` symbols, so bundled ICU/zlib/Abseil objects are
+internal by construction; we just need V8's `V8_EXPORT`→`__declspec(dllexport)`
+active for the v8::/cppgc:: surface and the monolith objects pulled into one DLL.
+
+GN args for the Windows lane (`win_gn_args`):
+```
+target_os="win"  target_cpu="x64"  is_component_build=false
+v8_monolithic=true  v8_monolithic_for_shared_library=true
+v8_expose_public_symbols=true      # sets BUILDING_V8_SHARED → V8_EXPORT=dllexport (non-component)
+v8_use_external_startup_data=false  v8_enable_i18n_support=true
+v8_enable_sandbox=false  v8_enable_pointer_compression=false
+treat_warnings_as_errors=false  symbol_level=1
+```
+`v8_monolith` asserts `!is_component_build`, so component build is OUT;
+`v8_expose_public_symbols` is the non-component dllexport lever.
+
+`SEAL_TARGET_GN` `is_win` branch:
+```
+ldflags = [
+  "/WHOLEARCHIVE:" + rebase_path("$root_build_dir/obj/v8_monolith.lib", root_build_dir),
+  "/IMPLIB:"       + rebase_path("$root_out_dir/v8.dll.lib", root_build_dir),
+]
+```
+(Hiding is free; INCLUSION still needs `/WHOLEARCHIVE` to pull monolith objects.)
+
+**Biggest risk / required patch:** `v8::platform::NewDefaultPlatform` uses
+`V8_PLATFORM_EXPORT`, gated on `BUILDING_V8_PLATFORM_SHARED`, which V8 sets ONLY
+in component builds. Patch the libplatform export condition to:
+`if (is_component_build || v8_expose_public_symbols) { defines = [ "BUILDING_V8_PLATFORM_SHARED" ] }`
+or v8::platform exports go missing from v8.dll.
+
+**CRT:** Chromium non-component Windows default is `/MT`; `/MD` is component-only.
+Must match Skia's CRT (check skia-builder) — if Skia is `/MD`, force dynamic CRT
+explicitly. CRT choice doesn't leak ICU/absl, but mismatched CRT at a C++ DLL
+boundary is a real coexistence bug.
+
+**Audit (`seal/coff.py audit`, already drafted):** `llvm-readobj --coff-exports
+v8.dll` (cross-platform; dumpbin fallback). Raw-name deny check: zero `absl`,
+`_ZN4absl`, ICU `u_`/`ucnv_`/…, zlib `inflate`/`deflate`. Require exports
+containing `@v8@@`, `@cppgc@@`, and `@platform@v8@@`. No `.def` on the normal path
+(coff.py keeps `def-gen` as fallback only). Iterate on a Windows runner
+(GitHub windows-2022 / Tart Windows VM) — unprovable on macOS.
