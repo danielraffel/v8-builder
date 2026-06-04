@@ -51,7 +51,6 @@ def common_gn_args():
         'v8_monolithic=true',
         'v8_use_external_startup_data=false',
         'v8_enable_i18n_support=true',          # D2: Intl ON
-        'use_custom_libcxx=false',              # match Skia's system libc++ (macOS)
         'use_rtti=false',                       # match Skia -fno-rtti
         'v8_enable_sandbox=false',              # D3: hold constant; assert in consumer TU
         # D3 (verified via a V8 runtime fatal-check): the embedder (choc/Pulp, and
@@ -69,6 +68,9 @@ def mac_gn_args(arch):
         f'target_cpu="{arch}"',                 # arm64 | x64
         'target_os="mac"',
         'mac_deployment_target="11.0"',         # match Pulp/Skia (macOS 11+)
+        # macOS system libc++ is modern (C++20-complete) AND matches Skia's STL,
+        # so use it directly. (Proven: P1d.)
+        'use_custom_libcxx=false',
     ]
 
 
@@ -76,9 +78,13 @@ def linux_gn_args(arch):
     return common_gn_args() + [
         f'target_cpu="{arch}"',                 # x64 | arm64
         'target_os="linux"',
-        # ABI: match the real Skia Linux build's STL (proposal §5/D2b: likely
-        # libstdc++ since Skia doesn't set use_custom_libcxx). VALIDATE on CI before
-        # trusting — this is the highest Linux ABI risk and is unprovable on macOS.
+        # D2b RESOLVED (CI finding 2026-06-04): do NOT force use_custom_libcxx=false
+        # on Linux — Chromium's bundled debian-bullseye sysroot libstdc++ is too old
+        # for C++20 (no std::bit_cast / <source_location>) and V8 fails to compile.
+        # In the sealed-SHARED model V8 shares no C++ types with Skia (serialized
+        # boundary) and its libc++ is hidden by the seal, so V8 uses its OWN bundled
+        # libc++ (the default) — exactly like it bundles its own absl/icu. Skia keeps
+        # libstdc++; the two coexist because nothing STL crosses the boundary.
     ]
 
 
