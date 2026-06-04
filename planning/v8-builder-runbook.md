@@ -55,7 +55,8 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 | P2.3 | Flip Pulp default off libnode (D4) | TODO | only after A/B green |
 | P3.1 | Windows DLL (export-table seal) | BLOCKED | Windows runner required. Gated on CI/public-repo go. |
 | PUB | Public repo | DONE ✅ | github.com/danielraffel/v8-builder (public, clean: no iPlug, no binaries). |
-| P4.1 | CI: build-v8.yml (GitHub-hosted) | PARTIAL | build-v8.yml is a real pipeline (build-v8.py mac proven + linux lane; win=separate). **Gating item before a meaningful CI run: validate/identity_main.cpp is still a skeleton** — needs the real standalone forced-collision V8+Skia validator (the pulp-demo gate proved mac; CI/linux/win need this OS-agnostic one). |
+| P4.0 | Standalone validate/ harness (OS-agnostic) | DONE ✅ | Real V8-init + identity + forced flat-ICU coexistence. **Built+run locally on mac vs our sealed dylib: PASS** (V8 15.1.0 inits, evals 20+22=42, ICU coexists). Dawn-Abseil path via optional SKIA_DAWN_LIB (pulp demo already covers mac). CI-ready. |
+| P4.1 | CI: build-v8.yml (GitHub-hosted) | READY* | real pipeline (build-v8.py mac proven + linux lane + standalone validator). *Minor CI-tuning expected on first run (SKIA_DIR subpath, Linux STL/ABI, Dawn frameworks). win=separate DLL lane. |
 | P4.2 | Release: mNNN-v8-<ver> tag + manifest + pair lockfile | TODO | |
 | PUB | Create public GitHub repo + push | BLOCKED | needs explicit user go |
 
