@@ -53,10 +53,17 @@ empty lib) AND the Rust closure must still resolve.
    `$root_build_dir/local_rustc_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/*.rlib`
    via an `exec_script` glob). Mirrors V8's own `v8_hello_world` link closure (proven
    on mac when I extracted it). LEAD candidate.
-2. **Wrap in a `complete_static_lib` static_library** that deps `:v8_monolith`, then
-   the shared_library deps that — gn emits a self-contained archive, no manual rlibs.
+2. ~~**`complete_static_lib` wrapper**~~ — **RULED OUT (tested on mac 2026-06-04):**
+   a `complete_static_lib` static_library depping `:v8_monolith` yields an EMPTY
+   archive (`nm`: "no symbols", 16K dylib) — it does NOT unpack the nested
+   `v8_monolith.a`, so it bundles nothing. Dead end.
 3. **Last resort:** `-Wl,--allow-multiple-definition` — silences it but risks
    wrong-symbol-wins; NOT acceptable for a shipped artifact.
 
-The macOS lane (force_load + deps, Mach-O dedup) is the proven analog; ELF just needs
-one of the above. NOT pushed blind — verify on a fast runner.
+**Narrowed to candidate #1.** The remaining nuance is lld archive ordering: with
+`deps=[:v8_monolith]` (Rust closure) + an explicit `--whole-archive <monolith>`, lld
+duplicates because Rust/other objects' undefined refs pull deps-monolith members that
+whole-archive already provided. Fix likely = whole-archive the monolith BEFORE the
+deps libs, or dep only on the Rust targets (not the monolith) + whole-archive the
+monolith. Both need an on-Linux gn iteration loop to verify. macOS (force_load+deps,
+Mach-O dedup) is the proven analog. NOT pushed blind.

@@ -1,0 +1,3 @@
+/Users/danielraffel/Code/v8-builder/validate/build-arm64/CMakeFiles/v8_skia_validate.dir
+/Users/danielraffel/Code/v8-builder/validate/build-arm64/CMakeFiles/edit_cache.dir
+/Users/danielraffel/Code/v8-builder/validate/build-arm64/CMakeFiles/rebuild_cache.dir
