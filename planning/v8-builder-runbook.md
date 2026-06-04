@@ -36,7 +36,8 @@ Status legend: `TODO` · `WIP` · `DONE` · `BLOCKED` · `SKIP`. Update the **St
 |----|------|--------|-------|
 | P0.1 | Scaffold local repo (files, skeletons) | DONE | 18 files; build-v8.py CLI parses; stages exit 2 (honest skeleton) |
 | P0.2 | Harden Pulp capture test → identity-anchored gate | BLOCKED | v8-builder side DONE (run_validation.cmake, no skip-pass); Pulp-side hook spec'd in planning/pulp-patch-P0.2.md — needs go (Pulp main has user WIP) |
-| P0.3a | Positive control: harness PASSES against libnode | TODO | |
+| P0.2 | (Pulp hooks) demo builds+runs w/ V8 14.6 | DONE | required choc-v8.14 patch (patches/choc-v8.14.patch); identity probe + cube reach GPU init |
+| P0.3a | Positive control vs libnode | FINDING | libnode+Dawn ABORT: Abseil ODR (libnode 558 + Dawn 3212 absl syms). libnode NOT a clean provider; harness correctly refused fake-pass. True +control = our sealed shared lib. Seal policy now includes absl. |
 | P0.3b | Negative control A: unsealed V8 → link FAILS (dup ICU) | TODO | |
 | P0.3c | Negative control B: substituted engine → FAILS identity | TODO | |
 | P0.4 | Settle static-vs-shared spike (D5) + single-lib (§9) | DONE | shared, i18n-on (settled 2026-06-03) |

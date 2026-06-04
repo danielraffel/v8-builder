@@ -1,0 +1,32 @@
+--- /Users/danielraffel/Library/Caches/Pulp/fetchcontent-src/choc-f0f5cdf5a938b8b779fea6c083571cce5ccab925/choc/javascript/choc_javascript_V8.h	2026-06-01 19:03:29
++++ build-choc-v814-src/choc/javascript/choc_javascript_V8.h	2026-06-03 23:43:59
+@@ -107,7 +107,7 @@
+                                                               v8::Local<v8::String> specifier,
+                                                               v8::Local<v8::FixedArray> /*importAssertions*/)
+         {
+-            return static_cast<V8Context*> (c->GetIsolate()->GetData (0))
++            return static_cast<V8Context*> (v8::Isolate::GetCurrent()->GetData (0))
+                 ->loadDynamicModule (c, specifier);
+         });
+ 
+@@ -456,9 +456,9 @@
+     std::string v8StringToStd (v8::String& s)
+     {
+         std::string result;
+-        auto len = s.Utf8Length (isolate);
++        auto len = s.Utf8LengthV2 (isolate);
+         result.resize (static_cast<std::string::size_type> (len));
+-        s.WriteUtf8 (isolate, result.data(), len);
++        s.WriteUtf8V2 (isolate, result.data(), result.size(), v8::String::WriteFlags::kReplaceInvalidUtf8);
+         return result;
+     }
+ 
+@@ -522,7 +522,7 @@
+         auto ok = mod.ToLocalChecked()->InstantiateModule (localContext, +[] (v8::Local<v8::Context> c, v8::Local<v8::String> specifier,
+                                                                               v8::Local<v8::FixedArray>, v8::Local<v8::Module>)
+         {
+-            return static_cast<V8Context*> (c->GetIsolate()->GetData (0))
++            return static_cast<V8Context*> (v8::Isolate::GetCurrent()->GetData (0))
+                 ->loadStaticModule (c, specifier);
+         });
+ 

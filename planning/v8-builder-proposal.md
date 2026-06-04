@@ -70,8 +70,9 @@ The hard 20% — and the entire reason this repo needs to exist — is captured 
 
 Two failure modes a naïve `v8_monolith` build hits when linked next to Skia:
 
-1. **Duplicate ICU/zlib symbols.** Both V8 and Skia bundle ICU and zlib. Skia
-   ships ICU as a static archive with **plain, unversioned** symbols
+1. **Duplicate ICU/zlib/Abseil symbols.** Both V8 and Skia/Dawn bundle ICU, zlib,
+   **and Abseil** (Phase-0 finding §12b: a V8↔Dawn Abseil ODR collision aborts the
+   binary). Skia ships ICU as a static archive with **plain, unversioned** symbols
    (`_ubrk_open`, `_uloc_forLanguageTag`, …). A default `v8_monolith` exports the
    *same* flat names. At final link the linker sees two definitions →
    duplicate-symbol errors, or silent one-wins-at-runtime data mismatches.
@@ -568,9 +569,20 @@ successful link, on operational details. Plan these up front:
 
 ## 10. Decisions to settle (flag for Oli / review)
 
-- **D1 — V8 version pin.** Match the V8 inside the `libnode` we use today
-  (Node 26 → V8 ~13.x?) for API parity, or pin to a clean upstream V8 tag and
-  re-validate choc against it? Recommend: pin to a V8 tag and confirm choc builds.
+- **D1 — V8 version pin. → PIN MODERN V8 14.x (Codex pass-3 + Phase-0 finding).**
+  Node 26's libnode is **V8 `14.6.202.33-node.19`** (not "~13.x"). **Phase-0 finding
+  (2026-06-03):** Pulp's choc `choc_javascript_V8.h` does **not compile** against
+  V8 14.6 — it uses removed APIs (`v8::Context::GetIsolate()`, `String::Utf8Length`,
+  `String::WriteUtf8`). Decision: do **not** retreat to old V8 to satisfy stock choc
+  (that makes v8-builder a compatibility relic and ships a stale/insecure engine).
+  Instead **pin an exact modern V8 tag/commit** (V8 is at **15.1.27** as of
+  2026-06-03 and ships *many releases per day* — so this is a deliberate pinned bump
+  aligned to the paired Skia milestone, never a floating "latest") and **maintain a
+  `choc` modern-V8 patch as part of the consumer-integration gate** (the patch is the deliverable in
+  `patches/choc-v8.14.patch`; replacements: `Isolate::GetCurrent()`, `Utf8LengthV2`,
+  `WriteUtf8V2(...,WriteFlags::kReplaceInvalidUtf8)`; watch dynamic-import-callback
+  signature, `ScriptOrigin`, ArrayBuffer `BackingStore`). "Stock choc compiles" is no
+  longer the target; "modern V8 compiles + runs Pulp" is.
 - **D2 — i18n / ICU on or off. → RECOMMEND ON (general-artifact decision).** Pulp
   *itself* uses no `Intl` (grep 2026-06-03: zero `Intl`/locale usage in Pulp runtime
   JS or bundled `three.webgpu.js`; the one `localeCompare` is build-time Node
@@ -645,6 +657,13 @@ macOS first.
    waiting on the unsolved ICU-sealing spike — get a validated Windows V8 sooner.
 5. **Phase 4 — Windows sealed-ICU spike** (COFF internalization / symbol prefix),
    then arm64 Linux/Windows (uncomment matrix rows) and other variants.
+6. **Phase 5 — iOS (deferred; requester 2026-06-03).** Only after *all* desktop
+   lanes are verified and PRs landed. iOS V8 must be **jitless** (no JIT allowed in
+   App Store builds) — `v8_enable_jitless=true` / `--jitless`, per
+   <https://v8.dev/docs/cross-compile-ios>. Today Apple uses JavaScriptCore and it
+   works fine; iOS-V8 is exploratory, not a blocker. Out of scope until then.
+7. **Phase 6 — Android (deferred; after iOS).** NDK cross-build of the shared lib;
+   reuses the sealing + validation machinery. Scope after iOS proves out.
 
 ## 12. Open risks
 
@@ -662,6 +681,36 @@ macOS first.
   specific V8 API surface and header layout (libnode ships headers under
   `include/node/`). Confirm choc compiles against clean `v8_monolith` headers, and
   that sandbox/pointer-compression defines match in the consumer TU.
+
+## 12b. Phase-0 findings (empirical, 2026-06-03)
+
+Built Pulp's real `threejs-native-demo` with V8 against Homebrew libnode in a Pulp
+worktree. Two concrete findings that change the plan:
+
+1. **choc doesn't compile against modern V8.** `choc_javascript_V8.h` uses
+   `v8::Context::GetIsolate()`, `String::Utf8Length`, `String::WriteUtf8` — all
+   removed by V8 14.6. Fixed with a 3-hunk patch (`patches/choc-v8.14.patch`:
+   `Isolate::GetCurrent()`, `Utf8LengthV2`, `WriteUtf8V2`); demo then builds + links.
+   → D1: pin exact modern V8 + carry a choc patch as the integration gate.
+
+2. **Abseil ODR collision between V8 and Dawn (the big one).** With the demo built,
+   it **aborts at runtime** in `absl::container_internal raw_hash_set PerTableSeed`
+   *inside libnode*, right after Skia/Dawn init, before any render. Root cause,
+   confirmed by `nm`: **libnode flat-exports 558 `absl` symbols** and
+   **`libdawn_combined.a` carries 3212**; the executable flat-exports **688** — two
+   different Abseil copies in one binary → swisstable seed/layout ODR → abort.
+   - This is the **ICU-collision story repeated for Abseil**, and the reference doc
+     never checked it (it only `nm`'d ICU/v8).
+   - **`libnode` is therefore NOT a clean coexistence provider with Dawn** — it
+     doesn't seal Abseil. The "proven macOS V8 lane" predates this Dawn/absl combo.
+   - **Sealing policy must cover `absl::` (and likely `protobuf`), not just
+     ICU/zlib** (`seal/policy.json` updated). The from-source **shared lib that
+     exports only `v8::`/`cppgc::`** is exactly the fix — Abseil stays internal and
+     cannot interpose Dawn's.
+   - Consequence for the rig: the libnode "positive control" can't be a clean green
+     (libnode+Dawn genuinely crashes). The **harness behaved correctly — it refused
+     to fake-pass** and surfaced a real abort. The true positive control becomes our
+     own sealed shared lib; until then, this collision IS the demonstration.
 
 ## 13. Review log
 
