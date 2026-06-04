@@ -69,19 +69,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p skia && cd skia
-          gh release download "${{ inputs.skia_release_tag }}" --repo olilarkin/skia-builder \
-            --pattern "*${{ matrix.platform }}*${{ matrix.arch }}*release*.zip" || true
-          for z in *.zip; do unzip -o "$z"; done || true
+          gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+            --pattern "*${{ matrix.platform }}*${{ matrix.arch }}*release*.zip"
+          for z in *.zip; do unzip -o "$z"; done
         env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
       - name: Validate coexistence (forced-collision link + identity, NO skip-pass)
         if: steps.sel.outputs.go == 'true'
         shell: bash
         run: |
+          # locate the dir holding Skia's static archives in the unzipped release
+          SKIA_LIBDIR="$(dirname "$(find skia -name 'libskunicode_icu.a' -o -name 'skunicode_icu.lib' | head -1)")"
+          echo "SKIA_LIBDIR=$SKIA_LIBDIR"
           cmake -S validate -B validate/build \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
-            -DV8_LIB_DIR="$PWD/build/${{ matrix.platform }}-${{ matrix.arch }}/lib" \
             -DV8_LIBRARY_PATH="$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
-            -DSKIA_DIR="$PWD/skia" \
+            -DSKIA_DIR="$SKIA_LIBDIR" \
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build
           ./validate/build/v8_skia_validate
