@@ -29,3 +29,34 @@ ICU symbol **renaming** (compile-time suffix via ICU's `U_DISABLE_RENAMING` /
 version-suffix machinery) would make V8's ICU symbols not collide with Skia's bare
 names at all — and it works on COFF. Needs verification that V8's GN/ICU build allows
 a custom suffix. Spike in Phase 0.4 / Phase 3.
+
+---
+
+## ELF seal — duplicate-symbol fix candidates (Linux, found 2026-06-04 CI)
+
+**Symptom:** `ninja v8_sealed_shared` on Linux → `ld.lld: error: duplicate symbol:
+v8::internal::AllowCompilation::...` (many). The injected gn target links the monolith
+TWICE: once via `deps = [":v8_monolith"]` (needed for the Rust-Temporal closure) and
+again via `-Wl,--whole-archive <monolith>`. macOS `-force_load` + deps dedups on
+Mach-O; **lld does NOT dedup under --whole-archive** → every symbol duplicated.
+
+**Constraint:** the monolith must appear ONCE on the link line, yet all its objects
+must be pulled (leaf .so has no undefined refs, so on-demand archive linking yields an
+empty lib) AND the Rust closure must still resolve.
+
+**Candidates to try (need a fast x64 Linux runner — each verify ≈ 2h on free GitHub):**
+1. **`data_deps` + explicit whole-archive + explicit Rust closure.** `data_deps =
+   [":v8_monolith"]` (build-order only, NOT link → no double) + ldflags
+   `--whole-archive <monolith> --no-whole-archive` + add the Rust rlibs explicitly
+   (glob `$root_build_dir/obj/third_party/rust/*/*/lib/*.rlib`,
+   `$root_build_dir/obj/build/rust/allocator/*.rlib`, and
+   `$root_build_dir/local_rustc_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/*.rlib`
+   via an `exec_script` glob). Mirrors V8's own `v8_hello_world` link closure (proven
+   on mac when I extracted it). LEAD candidate.
+2. **Wrap in a `complete_static_lib` static_library** that deps `:v8_monolith`, then
+   the shared_library deps that — gn emits a self-contained archive, no manual rlibs.
+3. **Last resort:** `-Wl,--allow-multiple-definition` — silences it but risks
+   wrong-symbol-wins; NOT acceptable for a shipped artifact.
+
+The macOS lane (force_load + deps, Mach-O dedup) is the proven analog; ELF just needs
+one of the above. NOT pushed blind — verify on a fast runner.
