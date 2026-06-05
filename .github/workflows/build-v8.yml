@@ -158,5 +158,63 @@ jobs:
     needs: validate-all
     if: ${{ !inputs.skip_release }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - run: echo "Tag mNNN-v8-<version>; attach validated per-platform zips + manifest + pair lockfile."
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { path: artifacts }
+      - name: Package per-platform zips + release notes
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ inputs.v8_version }}"
+          if [ -z "$ver" ]; then
+            ver="$(python3 -c "import json,glob;print(json.load(open(sorted(glob.glob('artifacts/**/manifest.json',recursive=True))[0]))['v8_version'])")"
+          fi
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          mkdir -p release
+          for d in artifacts/v8-*; do
+            [ -d "$d" ] || continue
+            name="$(basename "$d")"                 # v8-<platform>-<arch>
+            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${ver}.zip" . )
+          done
+          python3 - "$ver" > release/RELEASE_NOTES.md <<'PY'
+          import json, glob, sys
+          ver = sys.argv[1]
+          ms = sorted(glob.glob('artifacts/**/manifest.json', recursive=True))
+          print(f"**V8 {ver}** — a sealed, embeddable, shared V8 that coexists with "
+                f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
+                f"`Intl` on. See the README for the ABI/consumer contract.\n")
+          print("| platform | arch | v8 | sealed | Skia pair (validated against) |")
+          print("|---|---|---|---|---|")
+          for m in ms:
+              d = json.load(open(m)); p = d.get("pair", {}) or {}
+              skia = p.get("skia") or p.get("skia_release") or "—"
+              print(f"| {d.get('platform')} | {d.get('arch')} | {d.get('v8_version')} | "
+                    f"{'yes' if d.get('sealed') else 'NO'} | {skia} |")
+          print("\nEvery artifact in this release names the same V8 revision "
+                "(single-SHA gate). Each is build + seal-audited (0 ICU/zlib/Abseil "
+                "exports) + identity-checked (no skip-pass).")
+          PY
+          cat release/RELEASE_NOTES.md
+          ls -la release/
+      - name: Create / update GitHub release
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ steps.pkg.outputs.ver }}"
+          tag="v8-${ver}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" release/*.zip --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
+          else
+            gh release create "$tag" --repo "${{ github.repository }}" \
+              --title "V8 ${ver} (sealed, Skia/Dawn-coexisting)" \
+              --notes-file release/RELEASE_NOTES.md \
+              release/*.zip
+          fi
+          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,assets \
+            --jq '{tag:.tagName, assets:[.assets[].name]}'
