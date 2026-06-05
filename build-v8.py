@@ -414,6 +414,50 @@ class V8Build:
         (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         say(f"packaged {dest}")
 
+    # Windows identity validator, built AS A GN TARGET so it inherits V8's exact
+    # toolchain (clang-cl + the bundled libc++ __Cr ABI) and links the sealed v8.dll
+    # import lib. This is how a Windows consumer must build (the decided contract:
+    # clang-cl + libc++, Skia/Dawn-aligned), so it doubles as the consumable-ABI proof.
+    # Identity-only here (the Skia-ICU coexistence partner is stubbed); coexistence on
+    # Windows is added once Skia's win archive is wired the same way. The injected
+    # target deps :v8_sealed_shared, so v8.dll.lib resolves v8::/v8::platform exports.
+    WIN_VALIDATOR_MARKER = "# >>> v8-builder win identity validator (injected)"
+
+    def inject_win_validator(self):
+        if self.args.platform != "win":
+            return
+        build_gn = V8_DIR / "BUILD.gn"
+        text = build_gn.read_text(encoding="utf-8")
+        if self.WIN_VALIDATOR_MARKER in text:
+            return
+        # sources in the V8 root (gn sources are relative to //)
+        shutil.copy2(SEAL_DIR.parent / "validate" / "identity_main.cpp",
+                     V8_DIR / "v8_identity_main.cc")
+        (V8_DIR / "v8_identity_stub.cc").write_text(
+            '// stub: no Skia on the win validator yet (identity-only)\n'
+            'extern "C" int v8builder_force_collision_partners() { return 0; }\n',
+            encoding="utf-8")
+        gn = (f'{self.WIN_VALIDATOR_MARKER}\n'
+              'if (is_win && v8_monolithic) {\n'
+              '  executable("v8_identity_validator") {\n'
+              '    sources = [ "v8_identity_main.cc", "v8_identity_stub.cc" ]\n'
+              '    include_dirs = [ "include" ]\n'
+              '    deps = [ ":v8_sealed_shared" ]\n'
+              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self.tag}\\"" ]\n'
+              '  }\n'
+              '}\n')
+        build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
+        say("injected v8_identity_validator gn target")
+
+    def validate_win_identity(self, out):
+        run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
+        exe = out / "v8_identity_validator.exe"
+        if not exe.exists():
+            raise SystemExit(f"expected validator {exe} not produced")
+        # v8.dll is co-located in `out`, so the exe finds it on the default DLL search.
+        say("running Windows identity validator (V8 init + eval + version)")
+        run([str(exe)], cwd=out, env=self.env)
+
     def run_all(self):
         # mac is proven (P1d). linux validates on a Linux CI runner; the Windows DLL lane
         # (dllexport seal + /WHOLEARCHIVE) validates on a Windows runner — both unprovable
@@ -427,10 +471,13 @@ class V8Build:
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
         self.inject_seal_target()
+        self.inject_win_validator()
         for arch in archs:
             out = self.gn_gen(arch)
             sealed = self.build_sealed(out, arch)
             self.package(sealed, arch)
+            if self.args.platform == "win":
+                self.validate_win_identity(out)
         say("done", Colors.OK)
 
 

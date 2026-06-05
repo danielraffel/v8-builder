@@ -106,7 +106,10 @@ jobs:
           for z in *.zip; do unzip -o "$z"; done
         env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
       - name: Validate coexistence (forced-collision link + identity, NO skip-pass)
-        if: steps.sel.outputs.go == 'true'
+        # Windows self-validates IDENTITY inside build-v8.py (gn-target validator built
+        # with V8's clang-cl + libc++ — the decided consumer contract); the cmake
+        # coexistence harness here is mac/linux (system-ABI + Skia static archive).
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows'
         shell: bash
         run: |
           # locate the dir holding Skia's static archives in the unzipped release.
