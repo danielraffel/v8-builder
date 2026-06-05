@@ -73,8 +73,12 @@ jobs:
             macOS)   brew list ccache >/dev/null 2>&1 || brew install ccache ;;
             Windows) choco install ccache -y --no-progress ;;
           esac
+          # 4G holds a full V8 build's objects (ccache compresses ~2:1). GitHub's repo
+          # cache budget is 10G (LRU-evicted), and each of the 3 platforms keeps its own
+          # cache (key includes platform/arch), so 4G/platform fits ~2.5 platforms — the
+          # one you're actively iterating stays warm; older platforms evict harmlessly.
           echo "CCACHE_DIR=$(pwd)/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=4G" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
       - name: Restore ccache (compiled objects — re-runs recompile only changed TUs)
