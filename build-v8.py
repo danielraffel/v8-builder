@@ -180,7 +180,7 @@ ANDROID_DEFAULT_NDK_API_LEVEL = 29
 
 
 def android_gn_args(arch, ndk_api_level=ANDROID_DEFAULT_NDK_API_LEVEL,
-                    bundled_libcxx=False):
+                    bundled_libcxx=True):
     # Android is a CROSS-COMPILE from the x86_64-Linux host (host_cpu=x64,
     # host_os=linux, target_os=android). It reuses the already-green Linux ELF seal
     # (seal/elf.py, unchanged) — Android .so uses the same Itanium mangling + the same
@@ -206,33 +206,42 @@ def android_gn_args(arch, ndk_api_level=ANDROID_DEFAULT_NDK_API_LEVEL,
         # min-SDK floor, which gates which API the .so loads against.
         f'android_ndk_api_level={ndk_api_level}',
     ]
-    # CONSUMER-ABI GATE (the review's #1 risk). V8's public API exposes std:: types
-    # (v8::platform::NewDefaultPlatform(..., std::unique_ptr<...>)). V8 defaults to its
-    # BUNDLED libc++, which carries the `__Cr` ABI namespace (_LIBCPP_ABI_NAMESPACE=
-    # __Cr) — a stock-NDK consumer that links libc++ would then see a `__Cr`-vs-NDK
-    # libc++ mismatch on that std:: surface.
+    # CONSUMER-ABI GATE (the review's #1 risk) — RESOLVED BY EXPERIMENT.
     #
-    # PREFERRED (default): build the TARGET against the NDK's own libc++ via
-    # use_custom_libcxx=false, while host tools (torque/mksnapshot host build) keep
-    # Chromium's libc++ via use_custom_libcxx_for_host=true. c++.gni evaluates
-    # `use_custom_libcxx || (use_custom_libcxx_for_host && !is_a_target_toolchain)`,
-    # so the target toolchain ends up on the NDK libc++ and the __Cr namespace never
-    # enters the public ABI — giving the clean stock-NDK consumer story. This is the
-    # Android analog of the Linux "system libstdc++" decision, done the Android way.
+    # V8's public API exposes std:: types (v8::platform::NewDefaultPlatform(...,
+    # std::unique_ptr<...>)). V8 defaults to its BUNDLED libc++, which carries the `__Cr`
+    # ABI namespace (_LIBCPP_ABI_NAMESPACE=__Cr); a stock-NDK consumer linking the NDK
+    # libc++ would then see a __Cr-vs-NDK skew on that std:: surface.
     #
-    # FALLBACK (bundled_libcxx=True / -android-bundled-libcxx): if the NDK-libc++ target
-    # fails to link, fall back to V8's bundled libc++ folded statically into libv8.so
-    # (self-contained, no libc++_shared.so dependency) and document the __Cr consumer
-    # contract — the consumer must then build with a Chromium-style libc++ (the Windows
-    # model). libcxx_abi_unstable=false does NOT fix the __Cr namespace, so we do not
-    # rely on it.
-    if bundled_libcxx:
-        # leave use_custom_libcxx at V8's default (true) — bundled libc++.
-        pass
-    else:
+    # We TRIED the NDK-libc++ target FIRST (review addendum #1): use_custom_libcxx=false
+    # + use_custom_libcxx_for_host=true, which routes the target toolchain to the NDK
+    # libc++ while host tools keep Chromium libc++. It compiled all TUs but FAILED AT THE
+    # FINAL LINK on the DEPS-fetched cipd `android_toolchain`, two ways, both root-caused:
+    #   (a) default use_custom_libunwind=true emits `--unwindlib=none` and expects
+    #       Chromium's bundled libunwind — which is no longer dragged in once the custom
+    #       libc++ is dropped — so the solink fails undefined on _Unwind_Backtrace/
+    #       _Unwind_GetIP/...; and Chromium's bundled libunwind is visibility-locked to
+    #       its own libc++abi, so it can't be added back alongside the NDK libc++.
+    #   (b) forcing use_custom_libunwind=false makes clang's Android driver request
+    #       `-l:libunwind.a`, which the STRIPPED cipd android_toolchain does not ship
+    #       (it carries the NDK sysroot + NDK libc++, but no standalone unwinder).
+    # i.e. the cipd build-toolchain has no aarch64-android unwinder usable with NDK libc++.
+    #
+    # DECISION: default to V8's BUNDLED libc++ (the self-contained path that links on this
+    # toolchain — it provides its own complete libc++ / libc++abi / libunwind stack folded
+    # statically into libv8.so, no libc++_shared.so runtime dep). The consumer-ABI contract
+    # is then the WINDOWS model: the Android consumer (Pulp's NDK build) must compile
+    # against a Chromium-style (__Cr) libc++, exactly as the Windows v8.dll requires. The
+    # `--android-bundled-libcxx` flag / bundled_libcxx kept as an explicit lever; the
+    # NDK-libc++ attempt is re-enabled by passing bundled_libcxx=False once a FULL NDK
+    # (with a standalone libunwind.a) is wired in place of the cipd build-toolchain.
+    # libcxx_abi_unstable=false would NOT fix the __Cr namespace, so we do not rely on it.
+    if not bundled_libcxx:
         args += [
             'use_custom_libcxx=false',           # target -> NDK libc++ (stock-NDK ABI)
             'use_custom_libcxx_for_host=true',    # host tools stay on Chromium libc++
+            # NOTE: blocked on the cipd toolchain by the missing aarch64-android unwinder
+            # (see the gate writeup above). Only usable with a full NDK present.
         ]
     return args
 
@@ -246,7 +255,10 @@ def platform_gn_args(platform, arch, args=None):
         return win_gn_args(arch)
     if platform == "android":
         level = getattr(args, "ndk_api_level", None) or ANDROID_DEFAULT_NDK_API_LEVEL
-        bundled = bool(getattr(args, "android_bundled_libcxx", False))
+        # Default to bundled libc++ (the path that links on the cipd android_toolchain —
+        # see android_gn_args). --android-ndk-libcxx opts INTO the NDK-libc++ attempt,
+        # which needs a full NDK (standalone libunwind.a) to link.
+        bundled = not bool(getattr(args, "android_ndk_libcxx", False))
         return android_gn_args(arch, ndk_api_level=level, bundled_libcxx=bundled)
     raise SystemExit(f"gn args for platform '{platform}' not implemented")
 
@@ -547,8 +559,9 @@ class V8Build:
                                             "DT_NEEDED audits are the coexistence proof")
             manifest["ndk_api_level"] = (self.args.ndk_api_level
                                          or ANDROID_DEFAULT_NDK_API_LEVEL)
-            manifest["libcxx"] = ("bundled-chromium-__Cr"
-                                  if self.args.android_bundled_libcxx else "ndk")
+            manifest["libcxx"] = ("ndk"
+                                  if getattr(self.args, "android_ndk_libcxx", False)
+                                  else "bundled-chromium-__Cr")
             manifest["abi"] = {"arm64": "arm64-v8a", "x64": "x86_64",
                                "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
             # Lay the .so out as an Android app expects it (jniLibs/<abi>/libv8.so) so a
@@ -745,9 +758,10 @@ def main():
     p.add_argument("--fetch-only", action="store_true", help="Only setup depot_tools + fetch/sync V8")
     p.add_argument("-ndk-api-level", dest="ndk_api_level", type=int, default=None,
                    help=f"Android min-SDK floor (default {ANDROID_DEFAULT_NDK_API_LEVEL})")
-    p.add_argument("--android-bundled-libcxx", action="store_true",
-                   help="Android: fall back to V8's bundled (__Cr) libc++ instead of the "
-                        "NDK libc++ target ABI (use only if the NDK-libc++ target fails to link)")
+    p.add_argument("--android-ndk-libcxx", action="store_true",
+                   help="Android: attempt the NDK-libc++ target ABI (use_custom_libcxx=false) "
+                        "instead of the default bundled (__Cr) libc++. Needs a FULL NDK with a "
+                        "standalone libunwind.a — the DEPS cipd android_toolchain lacks it.")
     args = p.parse_args()
     b = V8Build(args)
     if args.fetch_only:

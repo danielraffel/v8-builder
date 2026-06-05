@@ -90,12 +90,13 @@ it catches leaks it was never told to look for.
 
 Link against the library and its headers. The **ABI contract** a consumer must match:
 
-- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows, `clang-cl`
-  with Chromium's `libc++` (the Windows `v8.dll` exposes the Chromium-style C++ ABI, as
-  the Chromium ecosystem does); on **Android**, the **NDK's own `libc++`** — the target
-  is built with `use_custom_libcxx=false` (host tools stay on Chromium's libc++ via
-  `use_custom_libcxx_for_host=true`) so the public `std::` surface matches a stock-NDK
-  consumer rather than V8's `__Cr`-namespaced libc++. RTTI is off.
+- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows and
+  **Android**, Chromium's `libc++` (the `__Cr` ABI namespace). On Android the NDK-libc++
+  target ABI was attempted first (`use_custom_libcxx=false`) but does not link against the
+  DEPS cipd `android_toolchain`, which ships no standalone unwinder — so `libv8.so` is
+  built with V8's bundled libc++ (folded statically; self-contained, no `libc++_shared.so`
+  dependency), and an Android consumer must compile against a Chromium-style `libc++`,
+  exactly the Windows model. RTTI is off.
 - **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
   macOS/Linux/Android, on on Windows) — a mismatch makes `V8::Initialize` abort with an
   explicit embedder-vs-V8 message.
@@ -130,9 +131,10 @@ validate/              # coexistence proof: V8 + Skia in one binary
   identity_main.cpp    #   asserts ENGINE identity (init + eval + version), not pixels
   smoke_gpu.cpp        #   forced-collision link against real Skia
   run_validation.cmake #   strict, no-skip-pass gate
-  android/             #   external stock-NDK consumer — the Android libc++-ABI gate
+  android/             #   external NDK consumer — the Android libc++-ABI gate
     CMakeLists.txt     #     links packaged headers + sealed libv8.so via the NDK toolchain
     consumer_main.cpp  #     exercises v8::platform's std::unique_ptr surface (the ABI test)
+                       #     (must build with a Chromium-style libc++ — the __Cr contract)
 tools/                 # release gates (single-SHA, Skia/V8 pair pinning)
 .github/workflows/     # per-platform build + seal + validate matrix
 ```
