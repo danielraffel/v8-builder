@@ -465,9 +465,16 @@ class V8Build:
         # arm64 Windows host (the local QEMU arm64 golden — see the win-local task / memory).
         host = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
         if gn_cpu(arch) != host:
-            say(f"cross-build (target {gn_cpu(arch)} != host {host}): validator BUILT but not "
-                f"run here — run v8_identity_validator.exe on a native {gn_cpu(arch)} Windows "
-                f"host to confirm identity", Colors.WARN)
+            # Bundle the cross-built validator + its co-located v8.dll into the uploaded
+            # artifact (build/<platform>-<arch>/validate/) so a native arm64 Windows host
+            # (the local QEMU golden) can run identity offline.
+            vdir = BUILD_DIR / f"{self.args.platform}-{arch}" / "validate"
+            vdir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(exe, vdir / exe.name)
+            shutil.copy2(out / "v8.dll", vdir / "v8.dll")
+            say(f"cross-build (target {gn_cpu(arch)} != host {host}): validator + v8.dll "
+                f"bundled into {vdir.name}/ — run on a native {gn_cpu(arch)} Windows host",
+                Colors.WARN)
             return
         # v8.dll is co-located in `out`, so the exe finds it on the default DLL search.
         say("running Windows identity validator (V8 init + eval + version)")
