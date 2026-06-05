@@ -85,6 +85,18 @@ def assemble_app(binary, framework_dir, work):
     if not fw_src.exists():
         raise SystemExit(f"V8.framework not found at {fw_src}")
     shutil.copytree(fw_src, app / "V8.framework")
+    # DTSDKName: the concrete iphonesimulatorNN.N the app was built against. simctl
+    # install accepts the bundle when DTPlatformName/DTSDKName are present (verified
+    # against a real installed sim app). Derive the version from the active SDK.
+    sdk_name = "iphonesimulator"
+    try:
+        v = subprocess.run(
+            ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"],
+            capture_output=True, text=True).stdout.strip()
+        if v:
+            sdk_name = f"iphonesimulator{v}"
+    except Exception:
+        pass
     info = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -99,7 +111,10 @@ def assemble_app(binary, framework_dir, work):
         '  <key>MinimumOSVersion</key><string>16.4</string>\n'
         '  <key>CFBundleSupportedPlatforms</key>'
         '<array><string>iPhoneSimulator</string></array>\n'
-        '  <key>UIDeviceFamily</key><array><integer>1</integer></array>\n'
+        '  <key>DTPlatformName</key><string>iphonesimulator</string>\n'
+        f'  <key>DTSDKName</key><string>{sdk_name}</string>\n'
+        '  <key>UIDeviceFamily</key>'
+        '<array><integer>1</integer><integer>2</integer></array>\n'
         '</dict></plist>\n')
     (app / "Info.plist").write_text(info, encoding="utf-8")
     say(f"assembled {app}")
