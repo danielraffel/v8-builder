@@ -55,26 +55,43 @@ def seal(monolith, out, policy_path):
     print(f"[seal/macho] sealed dylib: {out}")
 
 
-def audit(lib, policy_path):
-    pol = json.loads(Path(policy_path).read_text())
-    deny = pol["audit"]["must_be_zero_global"]
-    must = pol["audit"]["must_be_present"]
-    # nm -gU: only globally-visible (exported) defined symbols in the dylib.
+# Allow-list = exactly the surface the -exported_symbols_list pins (mangled, leading _).
+# We AUDIT with an allow-list, not a substring deny-list, for the same reason elf.py and
+# coff.py do: a deny substring-check FALSE-POSITIVES badly. Many legitimate v8::internal
+# symbols contain a deny token in their mangled name while themselves being v8 symbols —
+# e.g. `...set_icu_collator...` / `...u_string...` contain "u_", and a method taking an
+# `absl::flat_hash_set` TEMPLATE PARAMETER (`v8::internal::CppGraphBuilder::Run`) contains
+# "absl" — yet all start with __ZN2v8 and are part of the embedder ABI. The allow-list
+# still catches a REAL leak (`__ZN4absl...`, `_u_errorName`, ...) because it doesn't start
+# with a v8/cppgc prefix.
+V8_ALLOW_PREFIXES = tuple(p.rstrip("*") for p in KEEP_PATTERNS)
+
+
+def _exported_names(lib):
+    # nm -gU: globally-visible (exported) DEFINED symbols. Format: "<addr> <type> <name>".
     out = subprocess.run(["nm", "-gU", str(lib)], capture_output=True, text=True).stdout
-    syms = out.splitlines()
-    leaks = [d for d in deny if any(d in s for s in syms)]
-    if leaks:
-        print(f"[seal/macho] AUDIT FAIL — exported denied symbols: {leaks}", file=sys.stderr)
-        # show a few examples
-        for d in leaks:
-            ex = [s for s in syms if d in s][:3]
-            print("   e.g. " + " | ".join(ex), file=sys.stderr)
+    return [parts[-1] for parts in (ln.split() for ln in out.splitlines()) if parts]
+
+
+def audit(lib, policy_path):
+    json.loads(Path(policy_path).read_text())  # validate policy is readable/well-formed
+    names = _exported_names(lib)
+    if not names:
+        print(f"[seal/macho] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
         raise SystemExit(1)
-    v8_count = sum(1 for s in syms if "v8" in s)
+    leaks = [n for n in names if not any(n.startswith(p) for p in V8_ALLOW_PREFIXES)]
+    if leaks:
+        print(f"[seal/macho] AUDIT FAIL — {len(leaks)} non-v8/cppgc exports (seal leak: "
+              f"ICU/zlib/Abseil/std/etc.)", file=sys.stderr)
+        for n in leaks[:5]:
+            print(f"   e.g. {n}", file=sys.stderr)
+        raise SystemExit(1)
+    v8_count = sum(1 for n in names if n.startswith("__ZN2v8"))
     if v8_count == 0:
         print("[seal/macho] AUDIT FAIL — no v8 symbols exported", file=sys.stderr)
         raise SystemExit(1)
-    print(f"[seal/macho] AUDIT OK — 0 denied exports; {v8_count} v8 symbols exported")
+    print(f"[seal/macho] AUDIT OK — {len(names)} exports, all v8::/cppgc::; "
+          f"0 ICU/zlib/Abseil leaks")
 
 
 def main():
