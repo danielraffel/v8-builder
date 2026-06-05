@@ -1,0 +1,103 @@
+# build-v8-ios.yml — EXPLORATORY iOS (jitless) lane: build, seal as V8.framework,
+# and run the Simulator Abseil-ODR identity gate.
+#
+# STATUS: SKETCH. This lane is exploratory (#32) — Apple ships JavaScriptCore and
+# Pulp's iOS already uses it. The motivating use case is "same engine as desktop" for
+# three.js, not a perf or capability win. Do NOT treat this workflow as a required gate
+# until the local Simulator ODR gate (validate/ios/run_ios_gate.py) has passed and the
+# lane's go/no-go is recorded. iOS cross-builds on the macOS runner with the host Xcode
+# toolchain (no bundled-clang/Rust constraint, unlike Linux/Windows).
+#
+# Jitless is automatic on iphoneos (target_os=ios + use_blink=false ⇒ lite mode ⇒
+# v8_jitless), so TurboFan/Maglev/Sparkplug/WebAssembly are OFF. The artifact is a
+# SEALED dynamic V8.framework (Mach-O export-table seal: only v8::/cppgc:: leave the
+# export table; ICU/zlib/Abseil stay internal so V8 coexists with Dawn's flat Abseil).
+name: Build V8 (iOS, exploratory)
+on:
+  workflow_dispatch:
+    inputs:
+      v8_version:
+        description: 'V8 milestone or exact tag (default: synced tip). Pair with the m150 LKGR (15.1.27).'
+        required: false
+        type: string
+      skia_release_tag:
+        description: 'skia-builder release tag for the iOS coexistence archives'
+        required: true
+        default: 'chrome/m150'
+        type: string
+      deployment_target:
+        description: "iOS minimum OS (Pulp's floor)"
+        required: false
+        default: '16.4'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+
+jobs:
+  build-v8-ios:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The arm64 SIMULATOR cell is the cheap gating proof (no codesign; runs on the
+          # macOS runner's Simulator). The DEVICE cell builds + seals but cannot run the
+          # identity gate without a provisioned device — its gate is deferred.
+          - { env: simulator, arch: arm64, gate: true  }
+          - { env: device,    arch: arm64, gate: false }
+          # x86_64 simulator: only for Intel-host Sims; low priority on an all-arm fleet.
+          # - { env: simulator, arch: x64, gate: true }
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.x' }
+      - name: Set up ccache
+        run: brew list ccache >/dev/null 2>&1 || brew install ccache
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-ios-${{ matrix.env }}-${{ matrix.arch }}-${{ inputs.v8_version }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-ios-${{ matrix.env }}-${{ matrix.arch }}-${{ inputs.v8_version }}-
+            ccache-ios-${{ matrix.env }}-${{ matrix.arch }}-
+      - name: Build + seal V8 as V8.framework (jitless, Intl off)
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 4G
+        run: |
+          python3 build-v8.py ios -archs ${{ matrix.arch }} \
+            --ios-env ${{ matrix.env }} \
+            --ios-deployment-target ${{ inputs.deployment_target }} \
+            ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
+          ccache --show-stats 2>/dev/null || true
+      - name: Download matching iOS Skia (bundles Dawn/Abseil)
+        if: matrix.gate
+        run: |
+          mkdir -p skia && cd skia
+          gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+            --pattern "skia-build-ios-${{ matrix.env }}-*${{ matrix.arch }}*release*.zip"
+          for z in *.zip; do unzip -o "$z"; done
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+      - name: Simulator Abseil-ODR identity gate (NO skip-pass)
+        if: matrix.gate
+        run: |
+          CELL="ios-${{ matrix.env }}-${{ matrix.arch }}"
+          SKIA_LIBDIR="$(cd "$(dirname "$(find skia -path "*simulator-${{ matrix.arch }}*" -name libskunicode_icu.a | head -1)")" && pwd)"
+          DAWN="$SKIA_LIBDIR/libdawn_combined.a"
+          EXPECTED="$(python3 -c "import json;print(json.load(open('build/'+'$CELL'+'/manifest.json'))['v8_version'])")"
+          python3 validate/ios/run_ios_gate.py \
+            --framework-dir "$PWD/build/$CELL/lib" \
+            --include-dir   "$PWD/build/$CELL/include" \
+            --skia-dir      "$SKIA_LIBDIR" \
+            --dawn-lib      "$DAWN" \
+            --expected-version "$EXPECTED"
+      - name: Upload artifact (V8.framework + manifest)
+        uses: actions/upload-artifact@v7
+        with:
+          name: v8-ios-${{ matrix.env }}-${{ matrix.arch }}
+          path: build/ios-${{ matrix.env }}-${{ matrix.arch }}
