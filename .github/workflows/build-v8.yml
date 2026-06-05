@@ -68,7 +68,11 @@ jobs:
           echo "selected $ID -> go=$GO"
       - if: steps.sel.outputs.go == 'true'
         uses: actions/checkout@v6
-      - if: steps.sel.outputs.go == 'true'
+      - name: Set up Python (GitHub-hosted only; self-hosted uses system python3)
+        # actions/setup-python needs the hosted-runner tool cache, which the self-hosted
+        # Mac Studio runners don't provide — they already have a system python3. Skip it
+        # there and let build-v8.py use `python3` directly.
+        if: steps.sel.outputs.go == 'true' && runner.environment == 'github-hosted'
         uses: actions/setup-python@v6
         with: { python-version: '3.x' }
       - name: Free disk space (Linux)
