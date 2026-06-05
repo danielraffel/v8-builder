@@ -443,6 +443,11 @@ class V8Build:
               '    sources = [ "v8_identity_main.cc", "v8_identity_stub.cc" ]\n'
               '    include_dirs = [ "include" ]\n'
               '    deps = [ ":v8_sealed_shared" ]\n'
+              # :external_config is V8\'s embedder-facing public config — it applies the
+              # SAME feature defines V8 was built with (notably V8_COMPRESS_POINTERS, ON
+              # for Windows). Without it the consumer compiles compression-OFF and
+              # V8::Initialize aborts with an "embedder-vs-V8 mismatch" (CI 26995426061).
+              '    configs += [ ":external_config" ]\n'
               f'    defines = [ "EXPECTED_V8_VERSION=\\"{self.tag}\\"" ]\n'
               '  }\n'
               '}\n')
