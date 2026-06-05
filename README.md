@@ -1,58 +1,143 @@
 # v8-builder
 
-Build & **seal** a standalone, embeddable [V8](https://v8.dev/) for use *alongside*
-[Skia](https://skia.org/) Graphite + [Dawn](https://dawn.googlesource.com/dawn)
-(WebGPU) in a single binary — on macOS, Linux, and Windows.
+Build and **seal** a standalone, embeddable [V8](https://v8.dev/) that coexists with
+[Skia](https://skia.org/) and [Dawn](https://dawn.googlesource.com/dawn) (WebGPU) in a
+single native binary — macOS, Linux, and Windows, on both Intel and ARM.
 
-The flagship artifact is a **shared library** (`.dylib`/`.so`/`.dll`) with **`Intl`
-on**, whose export table exposes only the `v8::`/`cppgc::` embedder API and keeps
-ICU/zlib **internal** — the same property that lets Homebrew Node's `libnode` coexist
-with Skia today. This avoids the duplicate-ICU-symbol clash a naïve `v8_monolith`
-hits when linked next to Skia.
+## The problem this solves
 
-> **Status: scaffolding (Phase 0).** Nothing builds V8 yet. The scripts here are
-> skeletons; build logic lands phase by phase per the runbook. See the planning docs.
+V8, Skia, and Dawn each vendor their **own** copies of ICU, zlib, and (for the
+Chromium-derived libraries) Abseil. Link two or three of them into one binary the naïve
+way and you hit duplicate-symbol / **ODR** collisions. The Abseil clash is the nasty
+one: two copies of Abseil in a process don't just bloat the binary, they **abort at
+runtime** (e.g. duplicate flag/registry singletons), often far from where you linked
+them.
 
-## Why this exists
+`v8-builder` produces V8 as a **shared library** whose export table exposes *only* the
+`v8::` / `cppgc::` embedder API and keeps ICU, zlib, and Abseil **internal**. Because
+V8's copies are no longer exported, they can't collide with the copies inside Skia or
+Dawn — so all three coexist in one binary. (This is the same property that lets, say,
+Homebrew's `libnode` sit next to other libraries today.)
 
-See **`planning/v8-builder-proposal.md`** (the rationale, the ICU/ABI crux, and
-decisions D1–D9) and **`planning/v8-builder-runbook.md`** (the gated execution plan +
-live progress tracker). It is modeled on [skia-builder](https://github.com/olilarkin/skia-builder)
-so Skia and V8 artifacts share conventions.
+## Who this is for
+
+Anyone embedding V8 in a C++/native application that **also** links Skia and/or Dawn,
+cross-platform — GPU-accelerated creative and design tools, custom cross-platform UI
+frameworks, embedded/alternative browser shells, engine and DCC tooling. If you've ever
+seen a duplicate-ICU link error or an Abseil ODR abort while putting a JS engine next to
+a GPU stack, this repo is the fix.
+
+It's **not** specific to any one application. See [_How we use it_](#how-we-use-it) for
+the project it was originally built for.
+
+## What you get
+
+A shared library (`libv8.dylib` / `libv8.so` / `v8.dll`) that:
+
+- **Exports only `v8::` / `cppgc::`** — ICU, zlib, and Abseil stay internal (verified by
+  an export-table audit on every build; zero non-V8 leaks is a hard gate).
+- **Has `Intl` on** — full ICU is bundled *inside*, so `Intl`/locale features work
+  without exposing ICU's symbols.
+- **Is ABI-consumable** — built against the platform C++ runtime where that matters, so a
+  normal consumer can link it (see [_Consuming it_](#consuming-it) for the ABI contract).
+- Ships with a **manifest** recording the exact V8 revision and the Skia release it was
+  validated against (see [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)).
+
+## Status
+
+Each cell below is proven end-to-end: **build → seal (0 ICU/zlib/Abseil exports) →
+identity check** (the library initializes V8, evaluates JS, and reports its own version —
+no skip-pass), and on the CMake harness a **forced-collision coexistence link** against a
+real Skia build.
+
+| Platform | Intel (x64) | ARM (arm64) |
+|----------|-------------|-------------|
+| macOS    | in progress | ✅ validated |
+| Linux    | ✅ validated | ✅ validated |
+| Windows  | ✅ validated | ✅ validated |
+| iOS      | planned (jitless) | planned (jitless) |
+| Android  | planned     | planned     |
+
+V8 15.1; Intl on. Pointer compression is **off** on macOS/Linux (for drop-in parity with
+`libnode`-style consumers) and **on** on Windows (V8's supported default there) — a
+consumer must match, see below.
+
+## How the seal works
+
+The mechanism is the same idea on every platform — *don't export the bundled
+third-party symbols* — but the lever differs:
+
+- **Linux (ELF):** a version script (`{ global: v8::*, cppgc::*; local: *; }`) that hides
+  everything else; TLS built in the shared-library model.
+- **macOS (Mach-O):** an `-exported_symbols_list` restricting the dylib to the
+  `v8::`/`cppgc::` mangled surface.
+- **Windows (PE/COFF):** V8's `dllexport` (`V8_EXPORT`) already marks only the public
+  surface, so the monolith's ICU/zlib/Abseil objects stay internal by construction; one
+  `v8.dll` is produced via whole-archive.
+
+Each backend has an **auditor** that re-reads the finished binary's export/symbol table
+and fails the build if anything outside `v8::`/`cppgc::` (plus V8's own
+`v8_inspector::`/`heap::` and C entry points on Windows) is exported — an allow-list, so
+it catches leaks it was never told to look for.
+
+## Consuming it
+
+Link against the library and its headers. The **ABI contract** a consumer must match:
+
+- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows, `clang-cl`
+  with Chromium's `libc++` (the Windows `v8.dll` exposes the Chromium-style C++ ABI, as
+  the Chromium ecosystem does). RTTI is off.
+- **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
+  macOS/Linux, on on Windows) — a mismatch makes `V8::Initialize` abort with an explicit
+  embedder-vs-V8 message.
+
+Beyond that it's ordinary V8: create a platform, an isolate, a context, and run.
+
+## Coexistence is ABI + seal, not version-matching
+
+V8 and Skia/Dawn don't share C++ types — they interoperate through serialized data, and
+each keeps its **own** sealed copy of ICU/zlib/Abseil. So whether they coexist depends on
+**ABI compatibility at the link boundary** (libc++/STL, RTTI, pointer compression) plus
+the symbol seal — **not** on the two being the same upstream version. (Empirically, V8
+15.1 coexists fine with Skia from a *different* Chromium milestone.)
+
+Each release therefore records a **validated pair** — the exact V8 build and the exact
+Skia release it was tested against, SHA-pinned in the manifest. That's a *proof of
+coexistence*, not a claim of an upstream-blessed match. A multi-platform release is gated
+so every per-platform artifact names the **same** V8 revision (no mixed-revision
+releases). Building both Skia and V8 from one Chromium DEPS revision would yield a truly
+co-built pair — a possible future option, not what this does today.
 
 ## Layout
 
 ```
-build-v8.py            # build orchestrator (CLI), mirrors build-skia.py  [skeleton]
-build-win.sh           # Windows helper wrapper                           [skeleton]
-seal/                  # the "make ICU/zlib invisible" policy + backends
-  policy.json          #   public-symbol policy + ICU/zlib deny prefixes
-  macho.py elf.py      #   per-platform export-list generators/auditors   [skeleton]
-  coff_research.md     #   Windows static-.lib sealing notes (not the flagship path)
-validate/              # cross-link proof: V8 + Skia/Dawn in one binary
+build-v8.py            # build + seal orchestrator (depot_tools / gn / ninja)
+seal/                  # the "keep ICU/zlib/Abseil invisible" policy + per-platform backends
+  policy.json          #   public-symbol allow-list + ICU/zlib/Abseil deny prefixes
+  elf.py macho.py coff.py   #   per-platform export-list generators + auditors
+  coff_research.md     #   Windows PE/COFF sealing notes
+validate/              # coexistence proof: V8 + Skia in one binary
   CMakeLists.txt
-  identity_main.cpp    #   asserts ENGINE identity, not pixels
+  identity_main.cpp    #   asserts ENGINE identity (init + eval + version), not pixels
+  smoke_gpu.cpp        #   forced-collision link against real Skia
   run_validation.cmake #   strict, no-skip-pass gate
-.github/workflows/     # build-v8.yml + validate-v8.yml                    [skeleton]
-planning/              # proposal + runbook (authoritative)
+tools/                 # release gates (single-SHA, Skia/V8 pair pinning)
+.github/workflows/     # per-platform build + seal + validate matrix
 ```
 
-## Consuming from Pulp
+## How we use it
 
-Through Pulp's existing provider contract (`core/view/CMakeLists.txt`):
-`-DPULP_JS_ENGINE=v8 -DV8_INCLUDE_DIR=… -DV8_LIB_DIR=… -DV8_LIBRARY_PATH=…`.
+This was built for **[Pulp](https://github.com/danielraffel/pulp)**, a cross-platform
+audio-plugin and application framework that renders JS-scripted GPU UIs via Dawn + Skia
+and offers a choice of JS engines (QuickJS / JavaScriptCore / V8). Pulp needed V8 as an
+option *without* giving up the Dawn/Skia render stack — exactly the ICU/Abseil
+coexistence problem above. Pulp consumes the sealed library through its engine-provider
+contract (`-DPULP_JS_ENGINE=v8` plus the include/library paths).
 
-**On Skia/V8 "matching":** there is no upstream-blessed Skia+V8 version pair here.
-V8 and Skia/Dawn don't share C++ types — they talk via serialized `choc::value`, and
-each bundles its **own sealed** ICU/zlib/Abseil. So coexistence depends on ABI compat
-at the link boundary (libc++/STL, RTTI, **pointer compression**) + the symbol seal —
-**not** on version matching. (Empirically: V8 15.1 coexists fine with Skia `chrome/m149`,
-which are *different* Chromium revisions.) Releases therefore record a **validated
-pair** — the exact V8 build + the exact Skia release it was tested against (SHA-pinned
-in the manifest) — which is a *proof of coexistence*, not a claim of an upstream match.
-The only way to get a truly co-tested pair would be to build both Skia and V8 from the
-**same Chromium DEPS revision** (a possible future option; not what we do today).
+Nothing in `v8-builder` is Pulp-specific, though — if you're putting V8 next to Skia and
+Dawn anywhere, it should work for you the same way.
 
 ## License
 
-MIT (see `LICENSE`). V8/ICU/zlib carry their own licenses; per-release SBOM planned.
+MIT (see `LICENSE`). V8, ICU, zlib, and Abseil carry their own licenses; a per-release
+SBOM is planned.
