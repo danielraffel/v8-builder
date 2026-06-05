@@ -107,10 +107,12 @@ def ios_gn_args(arch, env="device", deployment_target="16.4", i18n=False):
     # JITLESS IS AUTOMATIC, NOT HAND-SET. target_os=="ios" + target_platform=="iphoneos"
     # + use_blink==false (==!is_ios) drives v8_enable_lite_mode=true (gni/v8.gni:167-174),
     # which drives v8_jitless=true (BUILD.gn:439), which turns OFF TurboFan/Maglev/
-    # Sparkplug/WebAssembly. We deliberately do NOT set v8_enable_lite_mode / v8_jitless /
-    # v8_enable_turbofan / v8_enable_webassembly here — setting them by hand is redundant
-    # and risks fighting the gni resolution. Ignition (the bytecode interpreter) stays ON,
-    # so the full ECMAScript language runs (enough for three.js; no WASM global on iphoneos).
+    # Sparkplug/WebAssembly. We do NOT hand-set v8_enable_lite_mode / v8_jitless /
+    # v8_enable_turbofan — those auto-derive correctly from target_os=ios + iphoneos.
+    # v8_enable_webassembly IS set explicitly below, but ONLY to fix a host/target
+    # toolchain skew (see the comment at that line), not to change the target posture —
+    # the target value is already false via lite mode. Ignition (the bytecode interpreter)
+    # stays ON, so the full ECMAScript language runs (enough for three.js; no WASM on iphoneos).
     #
     # INTL/i18n: common_gn_args() HARD-SETS v8_enable_i18n_support=true. Appending
     # `=false` would be a GN DUPLICATE-ASSIGNMENT error (the same reason win_gn_args
@@ -131,6 +133,16 @@ def ios_gn_args(arch, env="device", deployment_target="16.4", i18n=False):
         'is_component_build=false',             # iOS doc + monolith both require non-component
         'use_custom_libcxx=false',              # platform libc++ (matches Skia/Dawn-on-iOS)
         f'v8_enable_i18n_support={"true" if i18n else "false"}',
+        # HOST/TARGET WASM SKEW FIX (verified failure 2026-06-05): jitless forces the iOS
+        # TARGET to v8_enable_webassembly=false, so the wasm *.tq files (wasm-objects.tq,
+        # where WasmFuncRef is defined) are excluded from the Torque source set. But the
+        # HOST-toolchain `torque` binary defaults v8_enable_webassembly=!lite_mode and
+        # builds WITH -DV8_ENABLE_WEBASSEMBLY (its #ifdef-driven @if(V8_ENABLE_WEBASSEMBLY)
+        # in torque-parser.cc then evaluates TRUE), so it tries to resolve WasmFuncRef in
+        # base.tq:1099 and aborts: `Torque Error: cannot find "WasmFuncRef"`. Setting the
+        # declare_arg explicitly (it defaults to "") forces it OFF for BOTH host and target
+        # toolchains, so the host torque's @if matches the target's excluded source set.
+        'v8_enable_webassembly=false',
         # v8_enable_pointer_compression stays false (inherited from common) — matches the
         # desktop D3 OFF posture and the V8 iOS doc.
         # v8_monolithic_for_shared_library=true (from common) IS correct here: the iOS
