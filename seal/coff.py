@@ -66,38 +66,63 @@ def _exports(lib):
     raise SystemExit("[seal/coff] need llvm-readobj or dumpbin to read PE exports")
 
 
-def _is_v8(name):
-    # MSVC mangles a symbol's namespace chain right-to-left, terminating in `@v8@@` /
-    # `@cppgc@@` immediately before the type/calling-convention suffix. Only v8::/cppgc::
-    # are dllexport'd (V8_EXPORT), so on a PE export table this substring is sufficient
-    # to identify the legitimate surface (incl. v8::internal::, v8::platform::).
-    return "@v8@@" in name or "@cppgc@@" in name
+# V8's INTENDED public export surface on PE. dllexport (V8_EXPORT) emits MORE than the
+# Linux/mac version-script allow-list (v8::/cppgc:: only): V8 also marks `v8_inspector::`
+# (the debugger protocol), `heap::base::` (conservative-stack lib), and a couple of
+# extern "C" entry points (e.g. CrashForExceptionInNonABICompliantCodeRange on Windows).
+# These are all V8's OWN symbols — ZERO collision risk with Skia/Dawn. So the seal goal
+# (ICU/zlib/Abseil/protobuf NOT exported) is unaffected; we accept V8's full namespace
+# surface and enforce the DENY list as the real seal gate. MSVC mangles the namespace
+# chain right-to-left, so `@v8@@`/`@v8_inspector@@`/etc. appear before the type suffix.
+V8_PUBLIC_NS = ("@v8@@", "@cppgc@@", "@v8_inspector@@", "@heap@@")
+
+
+def _is_v8_cxx(name):
+    return any(ns in name for ns in V8_PUBLIC_NS)
 
 
 def audit(lib, policy_path):
+    pol = json.loads(Path(policy_path).read_text())
+    # Only the C-name prefixes matter for UNDECORATED PE exports (ICU's C API, zlib).
+    deny_c = [d for d in pol["audit"]["must_be_zero_global"] if not d.startswith("_ZN")]
     exported = _exports(lib)
     if not exported:
         print(f"[seal/coff] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
         raise SystemExit(1)
-    # ALLOW-LIST (primary, unfakeable): every export MUST be on the v8::/cppgc:: surface.
-    # Anything else — bare C ICU/zlib names (u_*, inflate), absl `?...@absl@@`, icu
-    # `?...@icu_NN@@` — is a seal leak. This is strictly stronger than a deny-list, which
-    # both misses internals it didn't name AND false-positives: a bare token like "u_"
-    # matches legit v8 names (cpU_duration@TraceObject@tracing@platform@v8, cpU_profiler).
-    leaks = [s for s in exported if not _is_v8(s)]
+
+    leaks = []
+    for s in exported:
+        if s.startswith("?"):
+            # C++ mangled: must be on V8's public namespace surface. Catches absl
+            # (?...@absl@@), icu (?...@icu_NN@@), std, protobuf — none of which are V8's.
+            if not _is_v8_cxx(s):
+                leaks.append(s)
+        else:
+            # Undecorated (extern "C"): a C ICU/zlib name (u_*, ubrk_, inflate, ...) is a
+            # leak; anything else is one of V8's own C entry points — allowed.
+            if any(s.startswith(d) for d in deny_c):
+                leaks.append(s)
+
     if leaks:
         from collections import Counter
         buckets = Counter()
         for s in leaks:
             m = re.search(r"@([A-Za-z_][A-Za-z0-9_]*)@@", s) or re.match(r"([A-Za-z_]+)", s)
             buckets[m.group(1) if m else s[:16]] += 1
-        print(f"[seal/coff] AUDIT FAIL — {len(leaks)} non-v8/cppgc exports (seal leak). "
-              f"Top: {dict(buckets.most_common(6))}", file=sys.stderr)
+        print(f"[seal/coff] AUDIT FAIL — {len(leaks)} non-V8 exports (seal leak: "
+              f"ICU/zlib/Abseil/protobuf/std). Top: {dict(buckets.most_common(6))}",
+              file=sys.stderr)
         for s in leaks[:5]:
             print(f"   e.g. {s}", file=sys.stderr)
         raise SystemExit(1)
-    print(f"[seal/coff] AUDIT OK — {len(exported)} exports, all v8::/cppgc::; "
-          f"0 absl/icu/zlib leaks")
+
+    v8n = sum(1 for s in exported if "@v8@@" in s)
+    if v8n == 0:
+        print(f"[seal/coff] AUDIT FAIL — no v8 symbols exported "
+              f"(saw {len(exported)} exports)", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"[seal/coff] AUDIT OK — {len(exported)} exports on V8's public surface "
+          f"(v8/cppgc/v8_inspector/heap + V8 C entry points); 0 ICU/zlib/Abseil/protobuf leaks")
 
 
 # --- Fallback export mechanism: generate a .def from the monolith ----------
