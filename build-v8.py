@@ -750,6 +750,17 @@ class V8Build:
         self.fetch_v8()
         if not self.args.use_synced:
             self.sync_v8()
+        elif self.args.platform == "android":
+            # Android's NDK is gated on checkout_android, which only sync pulls. A bare
+            # --use-synced (e.g. CI building the fetched tip without a -tag) would leave
+            # third_party/android_toolchain absent and gn can't resolve the android
+            # toolchain. So on android we ALWAYS enable the gate + sync deps even under
+            # --use-synced (we just don't re-checkout a tag — sync the current HEAD's deps).
+            say("--use-synced + android: syncing deps with checkout_android (NDK gate)",
+                Colors.WARN)
+            self._enable_android_checkout()
+            run(["gclient", "sync", "-D", "--force", "--reset"],
+                cwd=SRC_DIR, env=self.env)
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
         self.inject_seal_target()
