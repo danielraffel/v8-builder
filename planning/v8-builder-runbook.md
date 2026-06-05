@@ -13,10 +13,10 @@
 |------|:----:|:----:|:----:|---|
 | macOS arm64 | ✅ | ✅ | ✅ | **DONE** — full Pulp threejs demo, identity gate PASS, real GPU |
 | macOS x86_64 | ✅ | ✅ | ✅ | **DONE** — sealed dylib + standalone validator PASS under Rosetta (universal = lipo) |
-| Linux x64 | ✅ compiles | 🔧 **fix staged** | ⚪ | CI run 26961155381 reproduced `ld.lld` duplicate-symbol. **Root cause = DOUBLE whole-archive** (solink rule already whole-archives `{{inputs}}`; hand-rolled `--whole-archive` was a 2nd copy). **Fix committed on branch `linux-seal-fix`** (drop the hand-rolled flags); CI 26965278162 validating. See planning/HANDOFF.md. |
-| Linux arm64 | ⚪ | n/a | ⚪ | **OPEN** — cross-compile from x64 (or native on Tart arm64 VM) + validate on arm64 runner |
-| Windows x64 | ⚪ | ⚪ | ⚪ | **OPEN** — DLL export-table seal lane NOT yet implemented in build-v8.py (it `SystemExit`s) |
-| Windows arm64 | ⚪ | ⚪ | ⚪ | **OPEN** — after the Windows x64 lane exists |
+| Linux x64 | ✅ | ✅ | ✅ | **DONE** (2026-06-04, merged `b5d21bf`, CI 26980969689 green) — 136734 v8::/cppgc:: exports, 0 absl/icu/zlib leaks, coexists with Skia, eval 42. Four fixes: drop double whole-archive; `v8_monolithic_for_shared_library=true` (TLS reloc); mangled-prefix-only version script (the `extern "C++"` glob leaked absl/icu template insts); allow-list audit. ABI: system libstdc++ (`use_sysroot=false`+`use_custom_libcxx=false`+`use_glib=false`) so it's drop-in (bundled `__Cr` libc++ was not). |
+| Linux arm64 | 🔧 building | — | ⚪ | **WIP** — cross-build on the arm64 Tart VM: V8's x86_64 clang under Rosetta (`host_cpu="x64"`), `target_cpu="arm64"`, `use_sysroot=false` against the VM's NATIVE modern arm64 libstdc++ (sidesteps the too-old bundled arm64 sysroot). gn gen passes; compiling. Validate natively on the arm64 VM. |
+| Windows x64 | ✅ | ✅ | 🔧 | **SEAL PROVEN** (CI 26975751590 → `[2432/2432]` v8.dll + import lib + coff allow-list audit clean). Lane in `build-v8.py` (win_gn_args, is_win seal branch, coff.py). Needs `v8_enable_pointer_compression=true` (the non-default non-compressed Windows matrix miscompiles JSAtomicsMutex/Torque). **DECISION (user 2026-06-04):** Windows keeps V8 bundled libc++ (MSVC STL re-breaks Torque on JSInterceptorMap); consumers use clang-cl + libc++ (Skia/Dawn-aligned). REMAINING: validate harness → clang-cl + V8 libc++; Pulp Windows → clang-cl (#27-pulp). Branch `windows-seal-lane`. |
+| Windows arm64 | ⚪ | ⚪ | ⚪ | **OPEN** — after the Windows x64 validate lands; cross from x64. |
 
 ### In flight
 - **CI run [26961155381](https://github.com/danielraffel/v8-builder/actions/runs/26961155381)**: linux/x64, **V8 15.1.27** (== the LKGR-pinned v8 SHA in `planning/lkgr-lock.json`), validated against **Skia `chrome/m150`**, identity-anchored, `skip_release=true`. mac/win matrix jobs correctly short-circuit (platforms=linux/x64).
