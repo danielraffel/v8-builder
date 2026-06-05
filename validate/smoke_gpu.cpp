@@ -22,14 +22,17 @@ int32_t ubrk_countAvailable(void);
 // the load-bearing probe: a static V8 .a could not hide its Abseil and would abort
 // here; a SEALED V8.framework keeps its Abseil internal so the two coexist.
 //
-// We reference Abseil's CityHash entry point (absl::hash_internal::CityHash64), a
-// stable symbol present in Dawn's bundled Abseil. Declared with the real C++ linkage
-// so the mangled name resolves against Dawn's archive at link.
+// We reference absl::base_internal::GetTID() — a flat, stable, no-arg Abseil entry
+// point VERIFIED present in Dawn's bundled iOS Abseil
+// (__ZN4absl13base_internal6GetTIDEv; Dawn's libdawn_combined.a carries ~2472 flat
+// absl symbols). Declared with the real C++ linkage so the mangled name resolves
+// against Dawn's archive at link, pulling Dawn's Abseil into the binary. Its return
+// type is absl::base_internal::pid_t-ish (int64 on this platform); we only need the
+// reference to resolve, so a matching signature is enough.
 #ifdef FORCE_DAWN_ABSEIL
-#include <cstddef>
-namespace absl { namespace hash_internal {
-uint64_t CityHash64(const char* s, size_t len);
-}}  // namespace absl::hash_internal
+namespace absl { namespace base_internal {
+int64_t GetTID();
+}}  // namespace absl::base_internal
 #endif
 
 extern "C" int v8builder_force_collision_partners() {
@@ -39,8 +42,7 @@ extern "C" int v8builder_force_collision_partners() {
   int sum = (name ? (int)name[0] : 0) + (int)n;
 #ifdef FORCE_DAWN_ABSEIL
   // Reference Dawn's Abseil so its flat copy is resident alongside V8's sealed copy.
-  static const char kProbe[] = "v8-builder-abseil-odr-probe";
-  sum += (int)(absl::hash_internal::CityHash64(kProbe, sizeof(kProbe) - 1) & 0xFF);
+  sum += (int)(absl::base_internal::GetTID() & 0xFF);
 #endif
   return sum;
 }
