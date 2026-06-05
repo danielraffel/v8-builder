@@ -382,3 +382,33 @@ unknown that decides whether Android is a half-day lane or needs a libc++-ABI sp
 it's the Android analog of the Windows "MSVC-STL vs V8 libc++" decision, and it can only
 be answered by actually compiling the §6 validator (which exercises the `v8::platform`
 `std::unique_ptr` surface) through the NDK toolchain and seeing if it links.
+
+## Review addendum — RepoPrompt + Codex (2026-06-05, both concur)
+
+Two independent reviews agreed on the substance. Corrections to fold in before building:
+
+1. **The libc++/ABI path is OPEN, not "the Windows model".** Codex: V8's `c++.gni`
+   supports `use_custom_libcxx=false` **with** `use_custom_libcxx_for_host=true` for cross
+   builds — i.e. build the *target* against NDK libc++ while host tools stay on Chromium
+   libc++. **Try this FIRST** — it may avoid the `__Cr` mismatch entirely and gives the
+   clean stock-NDK consumer story. Note: `libcxx_abi_unstable=false` does **not** fix the
+   `__Cr` namespace mismatch (separate concern) — don't rely on it.
+2. **The adb/GN-injected validator is a SMOKE TEST, not the ABI gate.** A validator built
+   as a GN target inside the V8 tree (with `:external_config`) proves a *Chromium-toolchain*
+   consumer, not a stock-NDK/Pulp one. **Add an external NDK CMake consumer** that links the
+   *packaged* headers + `libv8.so` exactly as Pulp would (exercising
+   `v8::platform::NewDefaultPlatform`'s `std::` surface). That is the real libc++ gate.
+3. `android_ndk_api_level` default in this checkout is **29** (23 is Cronet-only) — 23 is a
+   deliberate lower floor; justify it or use 29.
+4. **Version pin:** `build-v8.py`'s `DEFAULT_V8_TAG` is still `14.6.202.33`; the desktop
+   release is **15.1.27** — pin 15.1.27 for parity.
+5. **Plumbing beyond gn args** (both reviewers): `LIBNAME["android"]`,
+   `SEAL_BACKEND["android"]`, `default_arch`, `platform_gn_args` dispatch, argparse choice;
+   CI must **skip** the non-Windows Skia-download + CMake validator (no Android Skia); add a
+   `readelf -d` DT_NEEDED audit (the seal only checks exports, not deps); manifest field
+   `coexistence = identity-only`; ABI artifact layout (`jniLibs/arm64-v8a/`); and verify
+   `.gclient` `target_os=["android"]` / the generated build config actually settles after
+   `--custom-var=checkout_android=True` (don't assert it).
+6. Seal reuse (`seal/elf.py` unchanged, one-line `is_android` guard widen) — **confirmed** by
+   both. Caveat: also verify Android `solink` whole-archives `:v8_monolith` exactly once, as
+   the Linux rule does.
