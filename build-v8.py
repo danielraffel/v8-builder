@@ -192,6 +192,15 @@ def android_gn_args(arch, ndk_api_level=ANDROID_DEFAULT_NDK_API_LEVEL,
     args = common_gn_args() + [
         'target_os="android"',
         f'target_cpu="{gn_cpu(arch)}"',         # arm64 | x64 | arm | x86
+        # Android is ALWAYS cross-compiled from an x86_64-Linux host: V8's bundled host
+        # clang + Rust are x86_64-only (tools/clang has no Linux_arm64; the rust-toolchain
+        # ships only x86_64-unknown-linux-gnu rustlib), and config.gni hard-codes
+        # android_host_arch="x86_64". Pin host_cpu="x64" so gn selects the x86_64 host
+        # toolchain even when the build machine is arm64 (the bundled x86_64 host tools
+        # then run under Rosetta on an arm64 Mac/VM, or natively on an x86_64 host). An
+        # arm64 host_cpu makes gn demand an aarch64-linux-gnu rust host sysroot that the
+        # bundled toolchain does not ship → the build fails on libstd.rlib.
+        'host_cpu="x64"',
         # config.gni hard-wires android_ndk_root to the DEPS-fetched NDK
         # (//third_party/android_toolchain/ndk), so we set NO ndk path here — only the
         # min-SDK floor, which gates which API the .so loads against.
