@@ -42,7 +42,10 @@ jobs:
           - { os: macos-15,     platform: mac,   arch: arm64,  build: 'mac -archs arm64' }
           - { os: ubuntu-24.04, platform: linux, arch: x64,    build: 'linux -archs x64' }
           - { os: windows-2022, platform: win,   arch: x64,    build: 'win -archs x64' }
-          # macOS x86_64 / universal and arm64 Linux/Windows: add when the base lanes are green.
+          - { os: windows-2022, platform: win,   arch: arm64,  build: 'win -archs arm64' }
+          # win/arm64 cross-builds on the x64 runner (clang-cl → arm64); its seal audit is
+          # static, but the arm64 identity validator can't run on x64 — it runs on the local
+          # arm64 Windows VM (win-local task). macOS x86_64/universal + Linux arm64: add next.
     runs-on: ${{ matrix.os }}
     steps:
       - name: Select (exact, not substring)
@@ -102,7 +105,9 @@ jobs:
           python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
           ccache --show-stats 2>/dev/null || true
       - name: Download matching Skia release (coexistence target)
-        if: steps.sel.outputs.go == 'true'
+        # mac/linux only — Windows self-validates identity via the gn target and does not
+        # use the Skia coexistence harness (the seal audit IS its coexistence guarantee).
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p skia && cd skia

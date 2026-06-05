@@ -18,6 +18,7 @@ Copyright (c) 2026 Daniel Raffel. MIT. Structure inspired by skia-builder (Oli L
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -454,11 +455,20 @@ class V8Build:
         build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
         say("injected v8_identity_validator gn target")
 
-    def validate_win_identity(self, out):
+    def validate_win_identity(self, out, arch):
         run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
         exe = out / "v8_identity_validator.exe"
         if not exe.exists():
             raise SystemExit(f"expected validator {exe} not produced")
+        # A cross-built arm64 validator can't RUN on the x64 CI runner. Build + seal still
+        # happen here (the coff audit is static); the arm64 identity run happens on a native
+        # arm64 Windows host (the local QEMU arm64 golden — see the win-local task / memory).
+        host = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+        if gn_cpu(arch) != host:
+            say(f"cross-build (target {gn_cpu(arch)} != host {host}): validator BUILT but not "
+                f"run here — run v8_identity_validator.exe on a native {gn_cpu(arch)} Windows "
+                f"host to confirm identity", Colors.WARN)
+            return
         # v8.dll is co-located in `out`, so the exe finds it on the default DLL search.
         say("running Windows identity validator (V8 init + eval + version)")
         run([str(exe)], cwd=out, env=self.env)
@@ -482,7 +492,7 @@ class V8Build:
             sealed = self.build_sealed(out, arch)
             self.package(sealed, arch)
             if self.args.platform == "win":
-                self.validate_win_identity(out)
+                self.validate_win_identity(out, arch)
         say("done", Colors.OK)
 
 
