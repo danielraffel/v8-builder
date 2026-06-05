@@ -40,6 +40,7 @@ jobs:
       matrix:
         include:
           - { os: macos-15,     platform: mac,   arch: arm64,  build: 'mac -archs arm64' }
+          - { os: macos-15,     platform: mac,   arch: x86_64, build: 'mac -archs x86_64' }
           - { os: ubuntu-24.04, platform: linux, arch: x64,    build: 'linux -archs x64' }
           - { os: windows-2022, platform: win,   arch: x64,    build: 'win -archs x64' }
           - { os: windows-2022, platform: win,   arch: arm64,  build: 'win -archs arm64' }
@@ -127,13 +128,24 @@ jobs:
           # library NAME and emits `-lfoo/lib.a` (ld can't find it). Resolve to absolute.
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' -o -name 'skunicode_icu.lib' | head -1)")" && pwd)"
           echo "SKIA_LIBDIR=$SKIA_LIBDIR"
-          cmake -S validate -B validate/build \
+          # macOS may cross-build a cell (x86_64 dylib on the arm64 runner). Pin the
+          # validator's arch to the artifact's and run the x86_64 binary under Rosetta.
+          EXTRA=(); PRE=()
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            MARCH="${{ matrix.arch }}"; [ "$MARCH" = "x64" ] && MARCH="x86_64"
+            EXTRA+=("-DCMAKE_OSX_ARCHITECTURES=$MARCH")
+            if [ "$MARCH" = "x86_64" ] && [ "$(uname -m)" = "arm64" ]; then
+              softwareupdate --install-rosetta --agree-to-license || true
+              PRE=(arch -x86_64)
+            fi
+          fi
+          cmake -S validate -B validate/build "${EXTRA[@]}" \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
             -DV8_LIBRARY_PATH="$PWD/$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
             -DSKIA_DIR="$SKIA_LIBDIR" \
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build
-          ./validate/build/v8_skia_validate
+          "${PRE[@]}" ./validate/build/v8_skia_validate
       - name: Upload artifact
         if: steps.sel.outputs.go == 'true'
         uses: actions/upload-artifact@v7
