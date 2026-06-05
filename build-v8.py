@@ -345,20 +345,40 @@ class V8Build:
         else:
             say("v8 checkout present")
 
+    def _enable_android_checkout(self):
+        # Android: V8's DEPS gates the NDK (+ SDK) on the `checkout_android` custom var
+        # (a cipd package, ~3-4 GB, fetched not vendored). A default sync omits it, so
+        # third_party/android_toolchain/ndk is absent and gn can't resolve the android
+        # toolchain. The depot_tools `gclient sync` CLI in this pin does NOT accept
+        # `--custom-var` (verified: "no such option"); the gate must live in the
+        # .gclient solution's `custom_vars` (+ a top-level `target_os = ["android"]`).
+        # Idempotently rewrite .gclient to carry both, preserving the solution list.
+        gclient_file = SRC_DIR / ".gclient"
+        if not gclient_file.exists():
+            return
+        text = gclient_file.read_text(encoding="utf-8")
+        if '"checkout_android": True' in text and 'target_os' in text:
+            return
+        ns = {}
+        exec(text, ns)  # .gclient is a python file: solutions = [...], target_os = [...]
+        sols = ns.get("solutions", [])
+        for s in sols:
+            s.setdefault("custom_vars", {})["checkout_android"] = True
+        tos = sorted(set(ns.get("target_os", [])) | {"android"})
+        new = ("solutions = " + repr(sols) + "\n"
+               + "target_os = " + repr(tos) + "\n")
+        gclient_file.write_text(new, encoding="utf-8")
+        say("enabled checkout_android in .gclient (custom_vars + target_os)")
+
     def sync_v8(self):
         # Pin to the exact tag, then sync deps for that revision.
         run(["git", "fetch", "--tags", "--depth", "1", "origin", f"refs/tags/{self.tag}"],
             cwd=V8_DIR, env=self.env)
         run(["git", "checkout", f"refs/tags/{self.tag}"], cwd=V8_DIR, env=self.env)
-        # Android: V8's DEPS gates the NDK (+ SDK) on the `checkout_android` custom var
-        # (a cipd package, ~3-4 GB, fetched not vendored). A default sync omits it, so
-        # third_party/android_toolchain/ndk is absent and gn can't resolve the android
-        # toolchain. Enable the gate only for the android platform.
-        extra = []
         if self.args.platform == "android":
-            extra = ["--custom-var=checkout_android=True"]
+            self._enable_android_checkout()
         run(["gclient", "sync", "-D", "--force", "--reset",
-             f"--revision=src/v8@refs/tags/{self.tag}", *extra], cwd=SRC_DIR, env=self.env)
+             f"--revision=src/v8@refs/tags/{self.tag}"], cwd=SRC_DIR, env=self.env)
 
     # The seal is an IN-TREE gn shared_library target (proven on macOS, P1c): it deps
     # :v8_monolith and lets gn compute V8 15.1's full Rust-Temporal + system link
