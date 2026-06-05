@@ -101,11 +101,17 @@ jobs:
           path: build/${{ matrix.platform }}-${{ matrix.arch }}
 
   validate-all:
+    # Intra-repo single-V8-SHA gate (task #29): every per-platform artifact in a sweep
+    # must name the SAME V8 build — no mixed-revision release. Runs on every multi-cell
+    # dispatch (not just releases); release creation is additionally gated below.
     needs: build-v8
-    if: ${{ !inputs.skip_release }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "Gate - release only if every requested platform produced a VALIDATED artifact."
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with: { path: artifacts }
+      - name: Single-SHA gate (no mixed-revision release)
+        run: python3 tools/check_single_sha.py artifacts
 
   create-release:
     needs: validate-all
