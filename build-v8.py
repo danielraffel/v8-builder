@@ -261,6 +261,30 @@ class V8Build:
              "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
         return dest / libname
 
+    def _built_v8_sha(self):
+        try:
+            return subprocess.run(["git", "rev-parse", "HEAD"], cwd=V8_DIR,
+                                  capture_output=True, text=True).stdout.strip() or None
+        except Exception:
+            return None
+
+    def _lkgr_contract(self):
+        # FR1 shared release-manifest contract: skia-builder AND v8-builder emit the SAME
+        # fields naming the co-tested LKGR triple, so Pulp pairs the two releases by
+        # matching skia/v8/dawn SHAs — a machine-checkable guarantee, not a naming
+        # convention. We build V8 by TAG; `built_revision` is the SHA we actually built
+        # (== the LKGR v8 SHA when the tag resolves to it). See planning/feature-requests.md FR1.
+        lock = BASE_DIR / "planning" / "lkgr-lock.json"
+        c = {"source": "chromium-lkgr-deps", "this_artifact": "v8",
+             "built_revision": self._built_v8_sha()}
+        if lock.exists():
+            d = json.loads(lock.read_text())
+            for k in ("source", "skia", "v8", "dawn", "chromium_deps_blob"):
+                if k in d:
+                    c[k] = d[k]
+            c["source"] = d.get("source", c["source"])
+        return c
+
     def package(self, sealed, arch):
         dest = BUILD_DIR / f"{self.args.platform}-{arch}"
         inc = dest / "include"
@@ -276,6 +300,8 @@ class V8Build:
             "shared": True,
             "sealed": not self.args.no_seal,
             "lib": str(Path(sealed).name),
+            # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
+            "pair": self._lkgr_contract(),
         }
         (dest / "manifest.json").write_text(json.dumps(manifest, indent=2))
         say(f"packaged {dest}")
