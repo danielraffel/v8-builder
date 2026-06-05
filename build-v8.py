@@ -109,6 +109,14 @@ def linux_gn_args(arch):
     return common_gn_args() + [
         f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
         'target_os="linux"',
+        # V8's bundled Linux host toolchain (clang + Rust) is x86_64-only — there is no
+        # aarch64-unknown-linux-gnu rustlib in third_party/rust-toolchain. On an arm64 build
+        # MACHINE (the Rosetta VM that hosts the linux/arm64 CI cell) gn would default
+        # host_cpu=arm64 and try to build arm64 Rust host tools, which fails. Pin host_cpu=x64
+        # so gn uses the x86_64 host toolchain (run under Rosetta on the arm64 VM); target_cpu
+        # still cross-compiles to arm64. On a native x86_64 runner this is a no-op. Same fix
+        # as android_gn_args.
+        'host_cpu="x64"',
         # D2b REVISED (2026-06-04): build with the PLATFORM C++ ABI (system libstdc++),
         # NOT Chromium's bundled libc++. V8's public API exposes std types
         # (e.g. v8::platform::NewDefaultPlatform(..., std::unique_ptr<...>, ...)); the
