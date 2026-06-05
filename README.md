@@ -56,7 +56,7 @@ real Skia build.
 | Linux    | ✅ validated | ✅ validated |
 | Windows  | ✅ validated | ✅ validated |
 | iOS      | planned (jitless) | planned (jitless) |
-| Android  | planned     | planned     |
+| Android  | planned     | in progress |
 
 V8 15.1; Intl on. Pointer compression is **off** on macOS/Linux (for drop-in parity with
 `libnode`-style consumers) and **on** on Windows (V8's supported default there) — a
@@ -74,6 +74,12 @@ third-party symbols* — but the lever differs:
 - **Windows (PE/COFF):** V8's `dllexport` (`V8_EXPORT`) already marks only the public
   surface, so the monolith's ICU/zlib/Abseil objects stay internal by construction; one
   `v8.dll` is produced via whole-archive.
+- **Android (ELF):** the **same version-script seal as Linux** — Android `.so` uses
+  Itanium C++ mangling and the same `{ global: v8::*, cppgc::*; local: *; }` lever, so
+  `seal/elf.py` is reused unchanged. It's a **cross-compile** from an x86_64-Linux host
+  (`target_os=android`, `host_cpu=x64`); the build additionally runs a `readelf -d`
+  **DT_NEEDED audit** asserting the sealed `libv8.so` pulls no system ICU/zlib/Abseil at
+  load time. Artifacts ship in `jniLibs/<abi>/` layout.
 
 Each backend has an **auditor** that re-reads the finished binary's export/symbol table
 and fails the build if anything outside `v8::`/`cppgc::` (plus V8's own
@@ -84,12 +90,16 @@ it catches leaks it was never told to look for.
 
 Link against the library and its headers. The **ABI contract** a consumer must match:
 
-- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows, `clang-cl`
-  with Chromium's `libc++` (the Windows `v8.dll` exposes the Chromium-style C++ ABI, as
-  the Chromium ecosystem does). RTTI is off.
+- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows and
+  **Android**, Chromium's `libc++` (the `__Cr` ABI namespace). On Android the NDK-libc++
+  target ABI was attempted first (`use_custom_libcxx=false`) but does not link against the
+  DEPS cipd `android_toolchain`, which ships no standalone unwinder — so `libv8.so` is
+  built with V8's bundled libc++ (folded statically; self-contained, no `libc++_shared.so`
+  dependency), and an Android consumer must compile against a Chromium-style `libc++`,
+  exactly the Windows model. RTTI is off.
 - **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
-  macOS/Linux, on on Windows) — a mismatch makes `V8::Initialize` abort with an explicit
-  embedder-vs-V8 message.
+  macOS/Linux/Android, on on Windows) — a mismatch makes `V8::Initialize` abort with an
+  explicit embedder-vs-V8 message.
 
 Beyond that it's ordinary V8: create a platform, an isolate, a context, and run.
 
@@ -121,6 +131,10 @@ validate/              # coexistence proof: V8 + Skia in one binary
   identity_main.cpp    #   asserts ENGINE identity (init + eval + version), not pixels
   smoke_gpu.cpp        #   forced-collision link against real Skia
   run_validation.cmake #   strict, no-skip-pass gate
+  android/             #   external NDK consumer — the Android libc++-ABI gate
+    CMakeLists.txt     #     links packaged headers + sealed libv8.so via the NDK toolchain
+    consumer_main.cpp  #     exercises v8::platform's std::unique_ptr surface (the ABI test)
+                       #     (must build with a Chromium-style libc++ — the __Cr contract)
 tools/                 # release gates (single-SHA, Skia/V8 pair pinning)
 .github/workflows/     # per-platform build + seal + validate matrix
 ```

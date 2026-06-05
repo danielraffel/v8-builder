@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -43,9 +44,10 @@ SRC_DIR = BUILD_DIR / "src"
 V8_DIR = SRC_DIR / "v8"
 SEAL_DIR = BASE_DIR / "seal"
 
-# Default pin: matches Homebrew libnode's V8 (verified to coexist with Dawn once
-# Abseil is sealed). Bump deliberately, aligned to the paired Skia milestone (D1/D8).
-DEFAULT_V8_TAG = "14.6.202.33"
+# Default pin: matches the desktop release lanes (mac/linux/win all ship 15.1.27,
+# verified to coexist with Dawn once Abseil is sealed). Bump deliberately, aligned to
+# the paired Skia milestone (D1/D8).
+DEFAULT_V8_TAG = "15.1.27"
 
 # --- GN args (monolith static; sealed into a shared lib afterward) -----------
 # ABI MUST match the real Skia build (proposal §5): system libc++ on macOS,
@@ -86,8 +88,10 @@ def common_gn_args():
 
 
 # Map our arch labels (skia-builder convention) to V8 gn target_cpu values.
+# arm/x86 are the 32-bit Android ABIs (armeabi-v7a / x86); arm64/x64 cover the rest.
 def gn_cpu(arch):
-    return {"x86_64": "x64", "x64": "x64", "arm64": "arm64"}.get(arch, arch)
+    return {"x86_64": "x64", "x64": "x64", "arm64": "arm64",
+            "arm": "arm", "x86": "x86"}.get(arch, arch)
 
 
 def mac_gn_args(arch):
@@ -169,13 +173,93 @@ def win_gn_args(arch):
     ]
 
 
-def platform_gn_args(platform, arch):
+# Android min-SDK floor. config.gni's default_min_sdk_version is 29 in this checkout
+# (23 is a Cronet-only lower floor); 29 (Android 10) is the honest, supported default
+# and what stock NDK r-series apps target. Overridable via -ndk-api-level.
+ANDROID_DEFAULT_NDK_API_LEVEL = 29
+
+
+def android_gn_args(arch, ndk_api_level=ANDROID_DEFAULT_NDK_API_LEVEL,
+                    bundled_libcxx=True):
+    # Android is a CROSS-COMPILE from the x86_64-Linux host (host_cpu=x64,
+    # host_os=linux, target_os=android). It reuses the already-green Linux ELF seal
+    # (seal/elf.py, unchanged) — Android .so uses the same Itanium mangling + the same
+    # --version-script mechanism. So android_gn_args = common_gn_args (TLS-in-library,
+    # Intl ON, no-rtti, sandbox/compression OFF for desktop drop-in parity) PLUS the
+    # android triple, MINUS the three Linux-only ABI escapes (use_sysroot/
+    # use_custom_libcxx/use_glib): Android MUST build against the NDK sysroot, there is
+    # no host system libstdc++ to drop in to, and there is no glib on android.
+    args = common_gn_args() + [
+        'target_os="android"',
+        f'target_cpu="{gn_cpu(arch)}"',         # arm64 | x64 | arm | x86
+        # Android is ALWAYS cross-compiled from an x86_64-Linux host: V8's bundled host
+        # clang + Rust are x86_64-only (tools/clang has no Linux_arm64; the rust-toolchain
+        # ships only x86_64-unknown-linux-gnu rustlib), and config.gni hard-codes
+        # android_host_arch="x86_64". Pin host_cpu="x64" so gn selects the x86_64 host
+        # toolchain even when the build machine is arm64 (the bundled x86_64 host tools
+        # then run under Rosetta on an arm64 Mac/VM, or natively on an x86_64 host). An
+        # arm64 host_cpu makes gn demand an aarch64-linux-gnu rust host sysroot that the
+        # bundled toolchain does not ship → the build fails on libstd.rlib.
+        'host_cpu="x64"',
+        # config.gni hard-wires android_ndk_root to the DEPS-fetched NDK
+        # (//third_party/android_toolchain/ndk), so we set NO ndk path here — only the
+        # min-SDK floor, which gates which API the .so loads against.
+        f'android_ndk_api_level={ndk_api_level}',
+    ]
+    # CONSUMER-ABI GATE (the review's #1 risk) — RESOLVED BY EXPERIMENT.
+    #
+    # V8's public API exposes std:: types (v8::platform::NewDefaultPlatform(...,
+    # std::unique_ptr<...>)). V8 defaults to its BUNDLED libc++, which carries the `__Cr`
+    # ABI namespace (_LIBCPP_ABI_NAMESPACE=__Cr); a stock-NDK consumer linking the NDK
+    # libc++ would then see a __Cr-vs-NDK skew on that std:: surface.
+    #
+    # We TRIED the NDK-libc++ target FIRST (review addendum #1): use_custom_libcxx=false
+    # + use_custom_libcxx_for_host=true, which routes the target toolchain to the NDK
+    # libc++ while host tools keep Chromium libc++. It compiled all TUs but FAILED AT THE
+    # FINAL LINK on the DEPS-fetched cipd `android_toolchain`, two ways, both root-caused:
+    #   (a) default use_custom_libunwind=true emits `--unwindlib=none` and expects
+    #       Chromium's bundled libunwind — which is no longer dragged in once the custom
+    #       libc++ is dropped — so the solink fails undefined on _Unwind_Backtrace/
+    #       _Unwind_GetIP/...; and Chromium's bundled libunwind is visibility-locked to
+    #       its own libc++abi, so it can't be added back alongside the NDK libc++.
+    #   (b) forcing use_custom_libunwind=false makes clang's Android driver request
+    #       `-l:libunwind.a`, which the STRIPPED cipd android_toolchain does not ship
+    #       (it carries the NDK sysroot + NDK libc++, but no standalone unwinder).
+    # i.e. the cipd build-toolchain has no aarch64-android unwinder usable with NDK libc++.
+    #
+    # DECISION: default to V8's BUNDLED libc++ (the self-contained path that links on this
+    # toolchain — it provides its own complete libc++ / libc++abi / libunwind stack folded
+    # statically into libv8.so, no libc++_shared.so runtime dep). The consumer-ABI contract
+    # is then the WINDOWS model: the Android consumer (Pulp's NDK build) must compile
+    # against a Chromium-style (__Cr) libc++, exactly as the Windows v8.dll requires. The
+    # `--android-bundled-libcxx` flag / bundled_libcxx kept as an explicit lever; the
+    # NDK-libc++ attempt is re-enabled by passing bundled_libcxx=False once a FULL NDK
+    # (with a standalone libunwind.a) is wired in place of the cipd build-toolchain.
+    # libcxx_abi_unstable=false would NOT fix the __Cr namespace, so we do not rely on it.
+    if not bundled_libcxx:
+        args += [
+            'use_custom_libcxx=false',           # target -> NDK libc++ (stock-NDK ABI)
+            'use_custom_libcxx_for_host=true',    # host tools stay on Chromium libc++
+            # NOTE: blocked on the cipd toolchain by the missing aarch64-android unwinder
+            # (see the gate writeup above). Only usable with a full NDK present.
+        ]
+    return args
+
+
+def platform_gn_args(platform, arch, args=None):
     if platform == "mac":
         return mac_gn_args(arch)
     if platform == "linux":
         return linux_gn_args(arch)
     if platform == "win":
         return win_gn_args(arch)
+    if platform == "android":
+        level = getattr(args, "ndk_api_level", None) or ANDROID_DEFAULT_NDK_API_LEVEL
+        # Default to bundled libc++ (the path that links on the cipd android_toolchain —
+        # see android_gn_args). --android-ndk-libcxx opts INTO the NDK-libc++ attempt,
+        # which needs a full NDK (standalone libunwind.a) to link.
+        bundled = not bool(getattr(args, "android_ndk_libcxx", False))
+        return android_gn_args(arch, ndk_api_level=level, bundled_libcxx=bundled)
     raise SystemExit(f"gn args for platform '{platform}' not implemented")
 
 
@@ -183,7 +267,7 @@ def platform_gn_args(platform, arch):
 # analog (version-script + --whole-archive), validated on CI (unprovable on macOS).
 SEAL_TARGET_GN = '''\
 # >>> v8-builder sealed-shared target (injected)
-if ((is_mac || is_linux || is_win) && v8_monolithic) {
+if ((is_mac || is_linux || is_win || is_android) && v8_monolithic) {
   v8_shared_library("v8_sealed_shared") {
     output_name = "v8"
     sources = []
@@ -282,11 +366,38 @@ class V8Build:
         else:
             say("v8 checkout present")
 
+    def _enable_android_checkout(self):
+        # Android: V8's DEPS gates the NDK (+ SDK) on the `checkout_android` custom var
+        # (a cipd package, ~3-4 GB, fetched not vendored). A default sync omits it, so
+        # third_party/android_toolchain/ndk is absent and gn can't resolve the android
+        # toolchain. The depot_tools `gclient sync` CLI in this pin does NOT accept
+        # `--custom-var` (verified: "no such option"); the gate must live in the
+        # .gclient solution's `custom_vars` (+ a top-level `target_os = ["android"]`).
+        # Idempotently rewrite .gclient to carry both, preserving the solution list.
+        gclient_file = SRC_DIR / ".gclient"
+        if not gclient_file.exists():
+            return
+        text = gclient_file.read_text(encoding="utf-8")
+        if '"checkout_android": True' in text and 'target_os' in text:
+            return
+        ns = {}
+        exec(text, ns)  # .gclient is a python file: solutions = [...], target_os = [...]
+        sols = ns.get("solutions", [])
+        for s in sols:
+            s.setdefault("custom_vars", {})["checkout_android"] = True
+        tos = sorted(set(ns.get("target_os", [])) | {"android"})
+        new = ("solutions = " + repr(sols) + "\n"
+               + "target_os = " + repr(tos) + "\n")
+        gclient_file.write_text(new, encoding="utf-8")
+        say("enabled checkout_android in .gclient (custom_vars + target_os)")
+
     def sync_v8(self):
         # Pin to the exact tag, then sync deps for that revision.
         run(["git", "fetch", "--tags", "--depth", "1", "origin", f"refs/tags/{self.tag}"],
             cwd=V8_DIR, env=self.env)
         run(["git", "checkout", f"refs/tags/{self.tag}"], cwd=V8_DIR, env=self.env)
+        if self.args.platform == "android":
+            self._enable_android_checkout()
         run(["gclient", "sync", "-D", "--force", "--reset",
              f"--revision=src/v8@refs/tags/{self.tag}"], cwd=SRC_DIR, env=self.env)
 
@@ -338,15 +449,17 @@ class V8Build:
 
     def gn_gen(self, arch):
         out = V8_DIR / "out" / f"{self.args.platform}-{arch}"
-        args_gn = "\n".join(platform_gn_args(self.args.platform, arch)) + "\n"
+        args_gn = "\n".join(platform_gn_args(self.args.platform, arch, self.args)) + "\n"
         out.mkdir(parents=True, exist_ok=True)
         (out / "args.gn").write_text(args_gn, encoding="utf-8")
         say(f"args.gn:\n{args_gn}")
         run(["gn", "gen", str(out)], cwd=V8_DIR, env=self.env)
         return out
 
-    LIBNAME = {"mac": "libv8.dylib", "linux": "libv8.so", "win": "v8.dll"}
-    SEAL_BACKEND = {"mac": "macho.py", "linux": "elf.py", "win": "coff.py"}
+    LIBNAME = {"mac": "libv8.dylib", "linux": "libv8.so", "win": "v8.dll",
+               "android": "libv8.so"}
+    SEAL_BACKEND = {"mac": "macho.py", "linux": "elf.py", "win": "coff.py",
+                    "android": "elf.py"}
 
     def build_sealed(self, out, arch):
         run(["ninja", "-C", str(out), "v8_sealed_shared"], cwd=V8_DIR, env=self.env)
@@ -368,7 +481,28 @@ class V8Build:
         backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
         run([sys.executable, str(backend), "audit", "--lib", str(dest / libname),
              "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
+        if self.args.platform == "android":
+            self._android_dt_needed_audit(dest / libname)
         return dest / libname
+
+    # The export seal proves nothing LEAKS OUT; DT_NEEDED proves nothing UNWANTED is
+    # required at load time. An android drop-in libv8.so should depend only on the
+    # platform runtime (libc/libm/libdl + libc++/libc++abi when not folded static).
+    # A stray libicu*/libz dependency would mean V8 pulled the system copy instead of
+    # internalizing its own — the load-time analog of an export leak. Report it loudly;
+    # treat a SYSTEM icu/zlib NEEDED as a hard fail.
+    def _android_dt_needed_audit(self, lib):
+        out = subprocess.run(["readelf", "-d", str(lib)], capture_output=True,
+                             text=True).stdout
+        needed = re.findall(r"\(NEEDED\)\s+Shared library:\s+\[([^\]]+)\]", out)
+        say(f"DT_NEEDED: {needed}")
+        bad = [n for n in needed
+               if re.search(r"(libicu|libz\.so|libabsl)", n, re.IGNORECASE)]
+        if bad:
+            say(f"DT_NEEDED AUDIT FAIL — sealed libv8.so requires system "
+                f"icu/zlib/absl: {bad}", Colors.FAIL)
+            raise SystemExit(1)
+        say(f"DT_NEEDED AUDIT OK — {len(needed)} deps, no system icu/zlib/absl")
 
     def _built_v8_sha(self):
         try:
@@ -412,6 +546,29 @@ class V8Build:
             # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
             "pair": self._lkgr_contract(),
         }
+        if self.args.platform == "android":
+            # No skia-builder Android asset exists (skia-builder publishes no
+            # skia-build-android-*); Pulp builds Android Skia locally. So the Android
+            # lane validates IDENTITY only (V8 init + eval + version) and treats the
+            # seal audit + DT_NEEDED audit as the coexistence guarantee, exactly as the
+            # Windows lane records its identity-only status. Full V8<->Skia/Dawn
+            # coexistence on Android lands when a skia-builder android asset or an
+            # on-device Pulp render exists.
+            manifest["coexistence"] = "identity-only"
+            manifest["coexistence_note"] = ("no skia-builder android artifact; seal + "
+                                            "DT_NEEDED audits are the coexistence proof")
+            manifest["ndk_api_level"] = (self.args.ndk_api_level
+                                         or ANDROID_DEFAULT_NDK_API_LEVEL)
+            manifest["libcxx"] = ("ndk"
+                                  if getattr(self.args, "android_ndk_libcxx", False)
+                                  else "bundled-chromium-__Cr")
+            manifest["abi"] = {"arm64": "arm64-v8a", "x64": "x86_64",
+                               "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
+            # Lay the .so out as an Android app expects it (jniLibs/<abi>/libv8.so) so a
+            # consumer can drop the artifact straight into src/main/jniLibs.
+            jni = dest / "jniLibs" / manifest["abi"]
+            jni.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(sealed, jni / Path(sealed).name)
         (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         say(f"packaged {dest}")
 
@@ -480,38 +637,163 @@ class V8Build:
         say("running Windows identity validator (V8 init + eval + version)")
         run([str(exe)], cwd=out, env=self.env)
 
+    # Android identity validator, built AS A GN TARGET (the inject_win_validator ELF
+    # analog): an executable("v8_identity_validator") deps :v8_sealed_shared and compiles
+    # with :external_config so it inherits V8's exact feature defines (compression OFF,
+    # sandbox OFF) — otherwise V8::Initialize aborts on an embedder-vs-V8 mismatch.
+    #
+    # IMPORTANT (review addendum #2): a GN-target validator proves a *Chromium-toolchain*
+    # consumer, NOT a stock-NDK/Pulp one — it is the SMOKE TEST, not the libc++-ABI gate.
+    # The real ABI gate is the EXTERNAL NDK CMake consumer (validate/android/), which links
+    # the PACKAGED headers + libv8.so with a stock NDK toolchain. This in-tree target just
+    # proves V8 inits + evals on android-arm64 over an adb shell.
+    ANDROID_VALIDATOR_MARKER = "# >>> v8-builder android identity validator (injected)"
+
+    def inject_android_validator(self):
+        if self.args.platform != "android":
+            return
+        build_gn = V8_DIR / "BUILD.gn"
+        text = build_gn.read_text(encoding="utf-8")
+        if self.ANDROID_VALIDATOR_MARKER in text:
+            return
+        shutil.copy2(SEAL_DIR.parent / "validate" / "identity_main.cpp",
+                     V8_DIR / "v8_identity_main.cc")
+        (V8_DIR / "v8_identity_stub.cc").write_text(
+            '// stub: no Skia on the android validator (identity-only — no skia-builder\n'
+            '// android asset). The seal + DT_NEEDED audits are the coexistence proof.\n'
+            'extern "C" int v8builder_force_collision_partners() { return 0; }\n',
+            encoding="utf-8")
+        gn = (f'{self.ANDROID_VALIDATOR_MARKER}\n'
+              'if (is_android && v8_monolithic) {\n'
+              '  executable("v8_identity_validator") {\n'
+              '    sources = [ "v8_identity_main.cc", "v8_identity_stub.cc" ]\n'
+              '    include_dirs = [ "include" ]\n'
+              '    deps = [ ":v8_sealed_shared" ]\n'
+              '    configs += [ ":external_config" ]\n'
+              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self.tag}\\"" ]\n'
+              '  }\n'
+              '}\n')
+        build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
+        say("injected v8_identity_validator gn target (android)")
+
+    def _link_android_consumer(self, out, arch):
+        # Drive validate/android/link_consumer.sh: link the EXTERNAL consumer against the
+        # packaged sealed libv8.so + a Chromium-style __Cr libc++. A non-zero exit here is
+        # a hard ABI-gate FAIL (no skip-pass). Only arm64 today; other ABIs add a sysroot
+        # multilib path the script already parameterizes by target triple.
+        script = SEAL_DIR.parent / "validate" / "android" / "link_consumer.sh"
+        if not script.exists():
+            say("WARN: validate/android/link_consumer.sh missing — skipping ABI gate",
+                Colors.WARN)
+            return
+        pkg = BUILD_DIR / f"{self.args.platform}-{arch}"
+        level = str(self.args.ndk_api_level or ANDROID_DEFAULT_NDK_API_LEVEL)
+        say("android libc++-ABI gate: linking external __Cr consumer vs packaged libv8.so")
+        run(["bash", str(script), str(V8_DIR), str(out), str(pkg), level], env=self.env)
+
+    def validate_android_identity(self, out, arch):
+        run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
+        exe = out / "v8_identity_validator"
+        if not exe.exists():
+            raise SystemExit(f"expected validator {exe} not produced")
+        libname = self.LIBNAME[self.args.platform]
+        lib = out / libname
+        # Always bundle the cross-built exe + co-located libv8.so into the artifact so an
+        # arm64 emulator/device (Mac Studio) can run identity offline (the win-arm64-cross
+        # pattern). An android-arm64 ELF can't run on the x86_64 build host.
+        vdir = BUILD_DIR / f"{self.args.platform}-{arch}" / "validate"
+        vdir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(exe, vdir / exe.name)
+        shutil.copy2(lib, vdir / libname)
+        # The libc++-ABI GATE (review addendum #2): build the EXTERNAL consumer against
+        # the PACKAGED libv8.so with a Chromium-style __Cr libc++ (the Windows-model
+        # contract, since libv8.so ships V8's bundled __Cr libc++). A clean link proves
+        # the std:: public surface (v8::platform's std::unique_ptr) is consumable; the
+        # in-tree gn validator above is only the Chromium-toolchain smoke test.
+        self._link_android_consumer(out, arch)
+        # If an adb device/emulator matching the target abi is reachable, run it now.
+        if not shutil.which("adb"):
+            say(f"no adb in PATH: validator + {libname} bundled into {vdir.name}/ — "
+                f"run on an arm64 android emulator/device", Colors.WARN)
+            return
+        abi_out = subprocess.run(
+            ["adb", "shell", "getprop", "ro.product.cpu.abi"],
+            capture_output=True, text=True)
+        dev_abi = abi_out.stdout.strip()
+        want_abi = {"arm64": "arm64-v8a", "x64": "x86_64",
+                    "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
+        if abi_out.returncode != 0 or not dev_abi:
+            say(f"no adb device reachable: validator + {libname} bundled into "
+                f"{vdir.name}/ — run on an arm64 android emulator/device", Colors.WARN)
+            return
+        if dev_abi != want_abi:
+            say(f"adb device abi '{dev_abi}' != target '{want_abi}': cannot run "
+                f"{want_abi} validator here; bundled into {vdir.name}/", Colors.WARN)
+            return
+        tmp = "/data/local/tmp/v8val"
+        say(f"running android identity validator on device (abi {dev_abi})")
+        run(["adb", "shell", f"rm -rf {tmp} && mkdir -p {tmp}"], env=self.env)
+        run(["adb", "push", str(vdir / exe.name), f"{tmp}/{exe.name}"], env=self.env)
+        run(["adb", "push", str(vdir / libname), f"{tmp}/{libname}"], env=self.env)
+        run(["adb", "shell",
+             f"cd {tmp} && chmod +x {exe.name} && "
+             f"LD_LIBRARY_PATH={tmp} ./{exe.name}"], env=self.env)
+
     def run_all(self):
         # mac is proven (P1d). linux validates on a Linux CI runner; the Windows DLL lane
         # (dllexport seal + /WHOLEARCHIVE) validates on a Windows runner — both unprovable
         # on a macOS host. Do not report a lane validated until its OS workflow runs green.
-        default_arch = {"mac": "arm64", "linux": "x64", "win": "x64"}[self.args.platform]
+        default_arch = {"mac": "arm64", "linux": "x64", "win": "x64",
+                        "android": "arm64"}[self.args.platform]
         archs = (self.args.archs or default_arch).split(",")
         self.setup_depot_tools()
         self.fetch_v8()
         if not self.args.use_synced:
             self.sync_v8()
+        elif self.args.platform == "android":
+            # Android's NDK is gated on checkout_android, which only sync pulls. A bare
+            # --use-synced (e.g. CI building the fetched tip without a -tag) would leave
+            # third_party/android_toolchain absent and gn can't resolve the android
+            # toolchain. So on android we ALWAYS enable the gate + sync deps even under
+            # --use-synced (we just don't re-checkout a tag — sync the current HEAD's deps).
+            say("--use-synced + android: syncing deps with checkout_android (NDK gate)",
+                Colors.WARN)
+            self._enable_android_checkout()
+            run(["gclient", "sync", "-D", "--force", "--reset"],
+                cwd=SRC_DIR, env=self.env)
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
         self.inject_seal_target()
         self.inject_win_validator()
+        self.inject_android_validator()
         for arch in archs:
             out = self.gn_gen(arch)
             sealed = self.build_sealed(out, arch)
             self.package(sealed, arch)
             if self.args.platform == "win":
                 self.validate_win_identity(out, arch)
+            if self.args.platform == "android":
+                self.validate_android_identity(out, arch)
         say("done", Colors.OK)
 
 
 def main():
     p = argparse.ArgumentParser(description="Build & seal standalone V8 for embedding next to Skia/Dawn")
-    p.add_argument("platform", choices=["mac", "linux", "win"], help="Target platform")
-    p.add_argument("-archs", help="Comma-separated archs (e.g. arm64,x86_64 / x64)")
+    p.add_argument("platform", choices=["mac", "linux", "win", "android"],
+                   help="Target platform")
+    p.add_argument("-archs", help="Comma-separated archs (e.g. arm64,x86_64 / x64; "
+                                   "android: arm64,x64,arm,x86)")
     p.add_argument("-tag", dest="v8_version", help=f"V8 version tag (default {DEFAULT_V8_TAG})")
     p.add_argument("--no-seal", action="store_true", help="Skip sealing (debug only)")
     p.add_argument("--use-synced", action="store_true",
                    help="Build the currently-synced checkout instead of syncing to -tag")
     p.add_argument("--fetch-only", action="store_true", help="Only setup depot_tools + fetch/sync V8")
+    p.add_argument("-ndk-api-level", dest="ndk_api_level", type=int, default=None,
+                   help=f"Android min-SDK floor (default {ANDROID_DEFAULT_NDK_API_LEVEL})")
+    p.add_argument("--android-ndk-libcxx", action="store_true",
+                   help="Android: attempt the NDK-libc++ target ABI (use_custom_libcxx=false) "
+                        "instead of the default bundled (__Cr) libc++. Needs a FULL NDK with a "
+                        "standalone libunwind.a — the DEPS cipd android_toolchain lacks it.")
     args = p.parse_args()
     b = V8Build(args)
     if args.fetch_only:

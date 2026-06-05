@@ -44,15 +44,22 @@ jobs:
           - { os: ubuntu-24.04, platform: linux, arch: x64,    build: 'linux -archs x64' }
           - { os: windows-2022, platform: win,   arch: x64,    build: 'win -archs x64' }
           - { os: windows-2022, platform: win,   arch: arm64,  build: 'win -archs arm64' }
+          - { os: ubuntu-24.04, platform: android, arch: arm64, build: 'android -archs arm64' }
           # win/arm64 cross-builds on the x64 runner (clang-cl → arm64); its seal audit is
           # static, but the arm64 identity validator can't run on x64 — it runs on the local
           # arm64 Windows VM (win-local task). macOS x86_64/universal + Linux arm64: add next.
+          # android/arm64 is a CROSS-compile from the x86_64-Linux runner (target_os=android,
+          # host_cpu=x64): build + seal-audit + DT_NEEDED here; the arm64 identity exe runs on
+          # an arm64 emulator/device (bundled into the artifact's validate/ for offline run).
+          # No skia-builder android asset exists, so the coexistence proof is the seal +
+          # DT_NEEDED audits (manifest coexistence=identity-only) — Skia download + cmake
+          # validator are SKIPPED for android below.
     # macOS cells route to the LOCAL self-hosted pool by default (the Mac Studio / M5
     # runners labelled `v8-build`) — GitHub-hosted macOS is too slow/queued for fast
     # iteration, and the local runners also have Rosetta (so the mac x86_64 cross-validate
     # works). To force a macOS cell back onto GitHub-hosted for a workflow-validation run,
-    # set the repo variable V8_MACOS_RUNS_ON_JSON to '"macos-15"'. Linux/Windows stay on
-    # GitHub-hosted for now (not the bottleneck; their local hosts are the Rosetta/QEMU VMs).
+    # set the repo variable V8_MACOS_RUNS_ON_JSON to '"macos-15"'. Linux/Windows/Android stay
+    # on GitHub-hosted for now (not the bottleneck; their local hosts are the Rosetta/QEMU VMs).
     runs-on: ${{ startsWith(matrix.os, 'macos') && fromJSON(vars.V8_MACOS_RUNS_ON_JSON || '["self-hosted","macOS","ARM64","v8-build"]') || matrix.os }}
     steps:
       - name: Select (exact, not substring)
@@ -116,9 +123,11 @@ jobs:
           python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
           ccache --show-stats 2>/dev/null || true
       - name: Download matching Skia release (coexistence target)
-        # mac/linux only — Windows self-validates identity via the gn target and does not
-        # use the Skia coexistence harness (the seal audit IS its coexistence guarantee).
-        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows'
+        # mac/linux only. Windows self-validates identity via the gn target; Android has NO
+        # skia-builder asset (skia-builder publishes no skia-build-android-*), so it validates
+        # identity-only and treats the seal + DT_NEEDED audits as the coexistence guarantee.
+        # Both skip the Skia coexistence harness.
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android'
         shell: bash
         run: |
           mkdir -p skia && cd skia
@@ -130,7 +139,11 @@ jobs:
         # Windows self-validates IDENTITY inside build-v8.py (gn-target validator built
         # with V8's clang-cl + libc++ — the decided consumer contract); the cmake
         # coexistence harness here is mac/linux (system-ABI + Skia static archive).
-        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows'
+        # Android is SKIPPED: no Android Skia artifact, and the cross-built arm64 exe can't
+        # run on the x86_64 runner. build-v8.py runs the android identity validator (adb
+        # when a device is reachable; otherwise it bundles exe+libv8.so into the artifact's
+        # validate/ for an offline arm64-emulator run). Seal + DT_NEEDED audits gate here.
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android'
         shell: bash
         run: |
           # locate the dir holding Skia's static archives in the unzipped release.
