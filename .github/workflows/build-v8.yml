@@ -77,7 +77,12 @@ jobs:
           # cache budget is 10G (LRU-evicted), and each of the 3 platforms keeps its own
           # cache (key includes platform/arch), so 4G/platform fits ~2.5 platforms — the
           # one you're actively iterating stays warm; older platforms evict harmlessly.
-          echo "CCACHE_DIR=$(pwd)/.ccache" >> "$GITHUB_ENV"
+          # CCACHE_DIR must be a path the NATIVE ccache.exe understands. On Windows,
+          # git-bash's $(pwd) is an MSYS path (/d/a/...) that ccache.exe + actions/cache
+          # don't agree on (→ "Cache not found", nothing cached). `pwd -W` gives the
+          # native D:/a/... form, which matches actions/cache's ${{ github.workspace }}.
+          if [ "$RUNNER_OS" = "Windows" ]; then CDIR="$(pwd -W)/.ccache"; else CDIR="$(pwd)/.ccache"; fi
+          echo "CCACHE_DIR=$CDIR" >> "$GITHUB_ENV"
           echo "CCACHE_MAXSIZE=4G" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
