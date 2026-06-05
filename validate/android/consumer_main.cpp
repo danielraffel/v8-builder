@@ -1,20 +1,23 @@
-// validate/android/consumer_main.cpp — stock-NDK V8 consumer (the libc++-ABI gate).
+// validate/android/consumer_main.cpp — external V8 consumer (the libc++-ABI gate).
 //
-// Built by validate/android/CMakeLists.txt with the NDK toolchain + NDK default STL,
-// linking ONLY the packaged headers + sealed libv8.so. It deliberately exercises V8's
-// std::-typed public surface:
+// Built by validate/android/link_consumer.sh (or the sibling CMakeLists.txt with a full
+// NDK), linking ONLY the packaged headers + sealed libv8.so. It deliberately exercises
+// V8's std::-typed public surface:
 //
 //   std::unique_ptr<v8::Platform> = v8::platform::NewDefaultPlatform();
 //
-// If our libv8.so were built with V8's bundled __Cr-namespaced libc++ while this
-// consumer links the NDK's libc++, that std::unique_ptr<...> mangling would mismatch
-// and the link would fail with an undefined reference. A clean link + a correct run
-// proves the libc++ ABI is consumable by a normal NDK app — the single highest-
-// information fact this lane can establish. (The in-tree gn validator proves only a
-// Chromium-toolchain consumer; this proves the real one.)
+// libv8.so is built with V8's bundled __Cr-namespaced libc++ (the NDK-libc++ target ABI
+// is blocked on the DEPS cipd android_toolchain — see build-v8.py android_gn_args), so
+// the consumer must compile against a Chromium-style __Cr libc++, exactly the Windows-
+// model contract. The proof is that the consumer's undefined reference to
+// `v8::platform::NewDefaultPlatform(..., std::__Cr::unique_ptr<...>, ...)` mangles
+// IDENTICALLY to the symbol libv8.so exports (verified: the __Cr in both the consumer's
+// undefined ref and the library's export match) — a clean link is the gate's pass. The
+// in-tree gn validator proves a Chromium-toolchain consumer; this proves an external one
+// built outside the V8 tree, which is the consumer story Pulp actually ships.
 //
 // Asserts ENGINE IDENTITY: V8 inits, evals 20+22 == 42, and GetVersion() ==
-// EXPECTED_V8_VERSION. Exit 0 only on all three.
+// EXPECTED_V8_VERSION. Exit 0 only on all three (the run needs an arm64 device/emulator).
 
 #include <cstdio>
 #include <memory>

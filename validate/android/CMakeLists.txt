@@ -1,18 +1,20 @@
-# validate/android/CMakeLists.txt — the REAL Android libc++-ABI gate.
+# validate/android/CMakeLists.txt — the EXTERNAL Android libc++-ABI gate (portable form).
 #
-# This is deliberately an EXTERNAL, stock-NDK consumer: it is NOT a gn target inside
-# the V8 tree. It links the PACKAGED headers + the sealed libv8.so exactly as a normal
-# NDK app would, using the NDK's own toolchain file and the NDK's default STL. That is
-# the only way to prove the *consumable* libc++ ABI — a gn-target validator (built with
-# V8's Chromium toolchain) would only prove a Chromium-toolchain consumer can link, not
-# a stock-NDK/Pulp one. See planning/2026-06-05-android-plan.md §4 + review addendum #2.
+# This is the portable, full-NDK form of the gate. The ACTUAL gate run in this lane uses
+# the sibling `link_consumer.sh`, because the DEPS cipd android_toolchain that V8 fetches
+# is a stripped BUILD toolchain: it has no `android.toolchain.cmake` and no standalone
+# clang driver / libunwind.a, so cmake's android toolchain can't drive it. With a FULL
+# app NDK installed (one that ships android.toolchain.cmake), THIS file is the equivalent.
 #
-# It exercises V8's std::-typed public surface — v8::platform::NewDefaultPlatform()
-# returns std::unique_ptr<v8::Platform> — which is exactly where a __Cr-vs-NDK libc++
-# mismatch would surface as an undefined reference at link. A clean link + run is the
-# gate's pass.
+# Either way it is an EXTERNAL consumer (NOT a gn target inside the V8 tree): it links the
+# PACKAGED headers + sealed libv8.so exactly as an Android app would, exercising V8's
+# std::-typed public surface — v8::platform::NewDefaultPlatform() returns
+# std::unique_ptr<v8::Platform>. Because libv8.so ships V8's bundled __Cr libc++ (the
+# NDK-libc++ target ABI is blocked on the cipd toolchain), the consumer must compile
+# against a Chromium-style __Cr libc++ (the Windows-model contract); a clean link is the
+# gate's pass. See planning/2026-06-05-android-plan.md §4 + review addendum #2.
 #
-# Configure with the NDK toolchain file + ABI, e.g.:
+# Configure with the NDK toolchain file + ABI + a __Cr libc++, e.g.:
 #   cmake -S validate/android -B validate/android/build \
 #     -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
 #     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \

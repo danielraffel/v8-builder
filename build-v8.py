@@ -676,6 +676,21 @@ class V8Build:
         build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
         say("injected v8_identity_validator gn target (android)")
 
+    def _link_android_consumer(self, out, arch):
+        # Drive validate/android/link_consumer.sh: link the EXTERNAL consumer against the
+        # packaged sealed libv8.so + a Chromium-style __Cr libc++. A non-zero exit here is
+        # a hard ABI-gate FAIL (no skip-pass). Only arm64 today; other ABIs add a sysroot
+        # multilib path the script already parameterizes by target triple.
+        script = SEAL_DIR.parent / "validate" / "android" / "link_consumer.sh"
+        if not script.exists():
+            say("WARN: validate/android/link_consumer.sh missing — skipping ABI gate",
+                Colors.WARN)
+            return
+        pkg = BUILD_DIR / f"{self.args.platform}-{arch}"
+        level = str(self.args.ndk_api_level or ANDROID_DEFAULT_NDK_API_LEVEL)
+        say("android libc++-ABI gate: linking external __Cr consumer vs packaged libv8.so")
+        run(["bash", str(script), str(V8_DIR), str(out), str(pkg), level], env=self.env)
+
     def validate_android_identity(self, out, arch):
         run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
         exe = out / "v8_identity_validator"
@@ -690,6 +705,12 @@ class V8Build:
         vdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(exe, vdir / exe.name)
         shutil.copy2(lib, vdir / libname)
+        # The libc++-ABI GATE (review addendum #2): build the EXTERNAL consumer against
+        # the PACKAGED libv8.so with a Chromium-style __Cr libc++ (the Windows-model
+        # contract, since libv8.so ships V8's bundled __Cr libc++). A clean link proves
+        # the std:: public surface (v8::platform's std::unique_ptr) is consumable; the
+        # in-tree gn validator above is only the Chromium-toolchain smoke test.
+        self._link_android_consumer(out, arch)
         # If an adb device/emulator matching the target abi is reachable, run it now.
         if not shutil.which("adb"):
             say(f"no adb in PATH: validator + {libname} bundled into {vdir.name}/ — "
