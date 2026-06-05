@@ -47,7 +47,13 @@ jobs:
           # win/arm64 cross-builds on the x64 runner (clang-cl → arm64); its seal audit is
           # static, but the arm64 identity validator can't run on x64 — it runs on the local
           # arm64 Windows VM (win-local task). macOS x86_64/universal + Linux arm64: add next.
-    runs-on: ${{ matrix.os }}
+    # macOS cells route to the LOCAL self-hosted pool by default (the Mac Studio / M5
+    # runners labelled `v8-build`) — GitHub-hosted macOS is too slow/queued for fast
+    # iteration, and the local runners also have Rosetta (so the mac x86_64 cross-validate
+    # works). To force a macOS cell back onto GitHub-hosted for a workflow-validation run,
+    # set the repo variable V8_MACOS_RUNS_ON_JSON to '"macos-15"'. Linux/Windows stay on
+    # GitHub-hosted for now (not the bottleneck; their local hosts are the Rosetta/QEMU VMs).
+    runs-on: ${{ startsWith(matrix.os, 'macos') && fromJSON(vars.V8_MACOS_RUNS_ON_JSON || '["self-hosted","macOS","ARM64","v8-build"]') || matrix.os }}
     steps:
       - name: Select (exact, not substring)
         id: sel
