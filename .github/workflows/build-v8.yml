@@ -64,10 +64,34 @@ jobs:
       - name: Free disk space (Linux)
         if: steps.sel.outputs.go == 'true' && runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Set up ccache (build-v8.py auto-enables cc_wrapper when ccache is in PATH)
+        if: steps.sel.outputs.go == 'true'
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get update -qq && sudo apt-get install -y -qq ccache ;;
+            macOS)   brew list ccache >/dev/null 2>&1 || brew install ccache ;;
+            Windows) choco install ccache -y --no-progress ;;
+          esac
+          echo "CCACHE_DIR=$(pwd)/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
+      - name: Restore ccache (compiled objects — re-runs recompile only changed TUs)
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_version }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_version }}-
+            ccache-${{ matrix.platform }}-${{ matrix.arch }}-
       - name: Build + seal V8 (depot_tools/gn/ninja + export-table seal)
         if: steps.sel.outputs.go == 'true'
         shell: bash
-        run: python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
+        run: |
+          python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
+          ccache --show-stats 2>/dev/null || true
       - name: Download matching Skia release (coexistence target)
         if: steps.sel.outputs.go == 'true'
         shell: bash

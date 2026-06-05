@@ -18,9 +18,21 @@ Copyright (c) 2026 Daniel Raffel. MIT. Structure inspired by skia-builder (Oli L
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _ccache_args():
+    # Big CI win: cache compiled objects across runs so a re-run only recompiles the few
+    # TUs that changed (seal/ABI tweaks, the link) — minutes instead of a full ~1h build.
+    # Auto-on only when ccache is in PATH (CI installs it); local builds (already fast via
+    # the persistent build dir) are unaffected. use_remoteexec=false so cc_wrapper isn't
+    # overridden by V8's reclient/RBE detection.
+    if shutil.which("ccache"):
+        return ['cc_wrapper="ccache"', 'use_remoteexec=false']
+    return []
 
 BASE_DIR = Path(__file__).resolve().parent
 BUILD_DIR = BASE_DIR / "build"
@@ -69,7 +81,7 @@ def common_gn_args():
         'v8_enable_pointer_compression=false',
         'treat_warnings_as_errors=false',
         'symbol_level=1',
-    ]
+    ] + _ccache_args()
 
 
 # Map our arch labels (skia-builder convention) to V8 gn target_cpu values.
