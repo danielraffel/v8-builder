@@ -137,7 +137,29 @@ contract (`-DPULP_JS_ENGINE=v8` plus the include/library paths).
 Nothing in `v8-builder` is Pulp-specific, though — if you're putting V8 next to Skia and
 Dawn anywhere, it should work for you the same way.
 
+## Appendix: relationship to skia-builder
+
+`v8-builder` is inspired by Oli Larkin's
+[skia-builder](https://github.com/olilarkin/skia-builder) — the same idea (a
+reproducible, CI-driven builder that publishes prebuilt Chromium-derived libraries)
+applied to V8 instead of Skia. The two are intentionally designed to sit alongside each
+other:
+
+- **Shared build-system conventions** — a similar build-orchestrator CLI shape, the same
+  per-platform artifact naming (`<platform>-<arch>-…-release.zip`), and the same
+  gn/arch labels.
+- **A common release-pairing contract** — both emit the same manifest schema, so a
+  project consuming Skia *and* V8 can check it's using a **co-validated pair**: this repo
+  records the exact Skia release each V8 build was validated against (see
+  [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)), and the Skia side of
+  that pair is precisely what skia-builder produces.
+
+So if you already build Skia with skia-builder, V8 from here should slot in with the same
+ergonomics — and the coexistence/pairing checks tie the two together. (We hope folks
+already using skia-builder for a Skia/Dawn stack find this a natural companion.)
+
 ## License
 
 MIT (see `LICENSE`). V8, ICU, zlib, and Abseil carry their own licenses; a per-release
-SBOM is planned.
+SBOM is planned. Structure inspired by [skia-builder](https://github.com/olilarkin/skia-builder)
+(Oli Larkin).
