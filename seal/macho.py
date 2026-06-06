@@ -73,20 +73,45 @@ def _exported_names(lib):
     return [parts[-1] for parts in (ln.split() for ln in out.splitlines()) if parts]
 
 
+def classify_exports(names, deny=()):
+    """Pure classifier over a list of Mach-O exported symbol names (no I/O).
+
+    Returns (leaks, denied, v8_count):
+      - leaks:   exports NOT on the v8::/cppgc:: allow-list (the seal gate — primary).
+      - denied:  deny tokens that appear in a LEAKED export, deduped. Reported for
+                 diagnostics only; the allow-list is the gate, so a v8::internal::
+                 method whose *parameter* mangling mentions `absl`/`u_` is NEVER denied
+                 (it starts with __ZN2v8, so it is not even a leak).
+      - v8_count: number of exports on the __ZN2v8 ABI prefix (must be > 0).
+
+    The deny tokens here exist to make the regression net explicit: pass the policy
+    family names (`absl`, `icu`, `u_`, ...) and assert that a v8 method carrying them
+    as template params is NOT denied, while a standalone `__ZN4absl...` IS.
+    """
+    leaks = [n for n in names if not any(n.startswith(p) for p in V8_ALLOW_PREFIXES)]
+    denied = sorted({d for d in deny for n in leaks if d in n})
+    # Count the v8:: namespace surface (methods/const/vtable/typeinfo), mirroring
+    # elf.py — every prefix EXCEPT the cppgc:: ones. Used only for the "exported zero
+    # v8 symbols" sanity gate, so narrow-vs-broad is immaterial for a real sealed image.
+    v8_count = sum(1 for n in names
+                   if n.startswith(("__ZN2v8", "__ZNK2v8", "__ZTVN2v8",
+                                    "__ZTIN2v8", "__ZTSN2v8")))
+    return leaks, denied, v8_count
+
+
 def audit(lib, policy_path):
     json.loads(Path(policy_path).read_text())  # validate policy is readable/well-formed
     names = _exported_names(lib)
     if not names:
         print(f"[seal/macho] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
         raise SystemExit(1)
-    leaks = [n for n in names if not any(n.startswith(p) for p in V8_ALLOW_PREFIXES)]
+    leaks, _denied, v8_count = classify_exports(names)
     if leaks:
         print(f"[seal/macho] AUDIT FAIL — {len(leaks)} non-v8/cppgc exports (seal leak: "
               f"ICU/zlib/Abseil/std/etc.)", file=sys.stderr)
         for n in leaks[:5]:
             print(f"   e.g. {n}", file=sys.stderr)
         raise SystemExit(1)
-    v8_count = sum(1 for n in names if n.startswith("__ZN2v8"))
     if v8_count == 0:
         print("[seal/macho] AUDIT FAIL — no v8 symbols exported", file=sys.stderr)
         raise SystemExit(1)

@@ -81,15 +81,19 @@ def _is_v8_cxx(name):
     return any(ns in name for ns in V8_PUBLIC_NS)
 
 
-def audit(lib, policy_path):
-    pol = json.loads(Path(policy_path).read_text())
-    # Only the C-name prefixes matter for UNDECORATED PE exports (ICU's C API, zlib).
-    deny_c = [d for d in pol["audit"]["must_be_zero_global"] if not d.startswith("_ZN")]
-    exported = _exports(lib)
-    if not exported:
-        print(f"[seal/coff] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
-        raise SystemExit(1)
+def classify_exports(exported, deny_c):
+    """Pure classifier over a list of PE export names (no I/O).
 
+    Returns (leaks, v8_count). A PE export is a leak when:
+      - it is a C++ mangled name (starts with '?') NOT on V8's public namespace
+        surface (catches `?...@absl@@`, `?...@icu_NN@@`, std, protobuf), OR
+      - it is an undecorated extern "C" name that matches a deny-list C prefix
+        (`u_`, `ubrk_`, `inflate`, ...).
+    Crucially an undecorated name like `cpu_features_init` does NOT leak just because
+    it contains `u_`: the deny match is a prefix (startswith), not a substring.
+    And a C++ symbol carrying `@absl@@` as a TEMPLATE PARAMETER while resolving to
+    `@v8@@` is NOT a leak, because _is_v8_cxx() looks for V8's namespace anywhere.
+    """
     leaks = []
     for s in exported:
         if s.startswith("?"):
@@ -102,6 +106,20 @@ def audit(lib, policy_path):
             # leak; anything else is one of V8's own C entry points — allowed.
             if any(s.startswith(d) for d in deny_c):
                 leaks.append(s)
+    v8_count = sum(1 for s in exported if "@v8@@" in s)
+    return leaks, v8_count
+
+
+def audit(lib, policy_path):
+    pol = json.loads(Path(policy_path).read_text())
+    # Only the C-name prefixes matter for UNDECORATED PE exports (ICU's C API, zlib).
+    deny_c = [d for d in pol["audit"]["must_be_zero_global"] if not d.startswith("_ZN")]
+    exported = _exports(lib)
+    if not exported:
+        print(f"[seal/coff] AUDIT FAIL — no exports found in {lib}", file=sys.stderr)
+        raise SystemExit(1)
+
+    leaks, v8n = classify_exports(exported, deny_c)
 
     if leaks:
         from collections import Counter
@@ -116,7 +134,6 @@ def audit(lib, policy_path):
             print(f"   e.g. {s}", file=sys.stderr)
         raise SystemExit(1)
 
-    v8n = sum(1 for s in exported if "@v8@@" in s)
     if v8n == 0:
         print(f"[seal/coff] AUDIT FAIL — no v8 symbols exported "
               f"(saw {len(exported)} exports)", file=sys.stderr)
