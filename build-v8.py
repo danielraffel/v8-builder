@@ -514,6 +514,22 @@ class V8Build:
         except Exception:
             return None
 
+    def _built_v8_version(self):
+        # The manifest's v8_version must reflect what was ACTUALLY built, not the
+        # requested --tag / DEFAULT_V8_TAG (which can drift from the checkout — e.g.
+        # the iOS lane builds the LKGR 15.1.27 checkout while the desktop default pin
+        # is still 14.6). Resolve the exact tag at the built SHA; fall back to the
+        # requested tag only if the checkout has no matching tag.
+        try:
+            tag = subprocess.run(
+                ["git", "describe", "--tags", "--exact-match", "HEAD"],
+                cwd=V8_DIR, capture_output=True, text=True).stdout.strip()
+            if tag:
+                return tag
+        except Exception:
+            pass
+        return self.tag
+
     def _lkgr_contract(self):
         # FR1 shared release-manifest contract: skia-builder AND v8-builder emit the SAME
         # fields naming the co-tested LKGR triple, so Pulp pairs the two releases by
@@ -540,7 +556,7 @@ class V8Build:
         shutil.copytree(V8_DIR / "include", inc)
         is_ios = self.args.platform == "ios"
         manifest = {
-            "v8_version": self.tag,
+            "v8_version": self._built_v8_version(),
             "platform": self.args.platform,
             "arch": arch,
             # On iOS, Intl defaults OFF for the gate (no ICU to seal); other platforms
