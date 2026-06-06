@@ -81,7 +81,7 @@ jobs:
             -f platforms=all -f v8_version="$VER" -f skia_release_tag="$SKIA" -f skip_release="$SKIP"
           gh issue create --repo "${{ github.repository }}" \
             --title "V8 $VER available — auto-sweep dispatched ($ACTION)" \
-            --body "release-watch detected upstream V8 $VER (last published: ${{ steps.chk.outputs.last }}). Dispatched build-v8.yml (all platforms + single-SHA gate) for $VER against Skia $SKIA — mode: $ACTION. Watch it in the Actions tab. If mode is hold, review the run then re-dispatch build-v8.yml with skip_release=false to publish v8-$VER. Note: the macOS and linux-arm64 cells run on the self-hosted runners, so make sure those are online." || true
+            --body "release-watch detected upstream V8 $VER (last published: ${{ steps.chk.outputs.last }}). Dispatched build-v8.yml (all platforms + single-SHA gate) for $VER against Skia $SKIA — mode: $ACTION. Watch it in the Actions tab. If mode is hold, review the run then re-dispatch build-v8.yml with skip_release=false to publish v8-$VER. Runners auto-resolve: self-hosted when configured + online, else GitHub-hosted." || true
 
       - name: No new version
         if: steps.chk.outputs.newer == 'no'

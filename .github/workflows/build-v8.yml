@@ -34,7 +34,54 @@ permissions:
   contents: write
 
 jobs:
+  # ── Resolve runners ─────────────────────────────────────────────────────────────────
+  # GitHub-hosted by DEFAULT so a fork builds with zero setup. If you have your own
+  # (faster) runners, opt in by setting repo VARIABLES (Settings → Secrets and variables →
+  # Actions → Variables) — no edits to this file:
+  #   V8_MACOS_RUNS_ON_JSON        e.g. ["self-hosted","macOS","ARM64","v8-build"]
+  #   V8_LINUX_ARM64_RUNS_ON_JSON  e.g. ["self-hosted","Linux","ARM64","v8-build-linux"]
+  # Each is a JSON runs-on value (a "label" string or a labels array). This job checks
+  # whether a matching runner is actually ONLINE and routes there if so — otherwise it
+  # FALLS BACK to GitHub-hosted, so a sweep never queues forever on an offline runner.
+  # Defaults: macOS → macos-15; linux/arm64 → ubuntu-24.04 (where it CROSS-compiles, host
+  # x64 → target arm64, no emulation — V8's bundled toolchain is x86_64-host and runs
+  # natively on an x64 host; build + seal-audit + strip are all cross-capable).
+  resolve-runners:
+    runs-on: ubuntu-24.04
+    permissions:
+      administration: read   # read self-hosted runner online status (repo-level runners)
+    outputs:
+      macos: ${{ steps.r.outputs.macos }}
+      linux_arm64: ${{ steps.r.outputs.linux_arm64 }}
+    steps:
+      - id: r
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAC_PREF: ${{ vars.V8_MACOS_RUNS_ON_JSON }}
+          LARM_PREF: ${{ vars.V8_LINUX_ARM64_RUNS_ON_JSON }}
+        run: |
+          set -euo pipefail
+          # Echo $pref if a runner carrying its most-specific label is ONLINE, else $fallback.
+          # No preference (fork) → fallback with no API call. API error → fallback (safe).
+          resolve() {
+            pref="$1"; fallback="$2"
+            if [ -z "$pref" ]; then echo "$fallback"; return; fi
+            label="$(printf '%s' "$pref" | python3 -c 'import json,sys; a=json.load(sys.stdin); print(a[-1] if isinstance(a,list) else a)')"
+            online="$(gh api "repos/${{ github.repository }}/actions/runners" --paginate \
+              --jq "[.runners[]|select(.status==\"online\" and (.labels|map(.name)|index(\"$label\")))]|length" 2>/dev/null || echo 0)"
+            if [ "${online:-0}" -gt 0 ]; then echo "$pref"; else
+              echo "::notice::self-hosted '$label' offline/unconfigured — falling back to GitHub-hosted $fallback"
+              echo "$fallback"
+            fi
+          }
+          MAC="$(resolve "${MAC_PREF:-}" '"macos-15"')"
+          LARM="$(resolve "${LARM_PREF:-}" '"ubuntu-24.04"')"
+          echo "macos=$MAC" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$LARM" >> "$GITHUB_OUTPUT"
+          echo "resolved → macOS=$MAC  linux/arm64=$LARM"
+
   build-v8:
+    needs: resolve-runners
     strategy:
       fail-fast: false
       matrix:
@@ -65,14 +112,11 @@ jobs:
           # cmake coexistence harness: the macho seal audit is the coexistence guarantee, and
           # the Simulator Abseil-ODR gate was already proven GO on feature/ios-lane. Skia
           # download + cmake validator are SKIPPED for ios below (same shape as android/win).
-    # Routing: macOS cells → the LOCAL self-hosted pool (Mac Studio / M5, `v8-build` label)
-    # by default (GitHub-hosted macOS is too slow/queued; the local runners also have Rosetta
-    # so mac x86_64 cross-validate works — set V8_MACOS_RUNS_ON_JSON='"macos-15"' to force a
-    # cell back onto GitHub for a workflow-validation run). linux/arm64 → the self-hosted
-    # Rosetta-VM Linux runner (`v8-build-linux`), the proven host (V8's toolchain is
-    # x86_64-host-only, so arm64 Linux builds the x86_64 toolchain under Rosetta there).
-    # Everything else stays GitHub-hosted.
-    runs-on: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && fromJSON('["self-hosted","Linux","ARM64","v8-build-linux"]') || (startsWith(matrix.os, 'macos') && fromJSON(vars.V8_MACOS_RUNS_ON_JSON || '["self-hosted","macOS","ARM64","v8-build"]')) || matrix.os }}
+    # Routing comes from the resolve-runners job above: macOS + linux/arm64 use your
+    # self-hosted runners when configured AND online, else GitHub-hosted (macos-15 /
+    # ubuntu-24.04). Everything else is always GitHub-hosted. See resolve-runners for the
+    # opt-in repo variables.
+    runs-on: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && fromJSON(needs.resolve-runners.outputs.linux_arm64) || (startsWith(matrix.os, 'macos') && fromJSON(needs.resolve-runners.outputs.macos)) || matrix.os }}
     steps:
       - name: Select (exact, not substring)
         id: sel
