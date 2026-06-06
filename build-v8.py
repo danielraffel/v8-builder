@@ -133,15 +133,28 @@ def ios_gn_args(arch, env="device", deployment_target="16.4", i18n=False):
         'is_component_build=false',             # iOS doc + monolith both require non-component
         'use_custom_libcxx=false',              # platform libc++ (matches Skia/Dawn-on-iOS)
         f'v8_enable_i18n_support={"true" if i18n else "false"}',
-        # HOST/TARGET WASM SKEW FIX (verified failure 2026-06-05): jitless forces the iOS
-        # TARGET to v8_enable_webassembly=false, so the wasm *.tq files (wasm-objects.tq,
-        # where WasmFuncRef is defined) are excluded from the Torque source set. But the
-        # HOST-toolchain `torque` binary defaults v8_enable_webassembly=!lite_mode and
-        # builds WITH -DV8_ENABLE_WEBASSEMBLY (its #ifdef-driven @if(V8_ENABLE_WEBASSEMBLY)
-        # in torque-parser.cc then evaluates TRUE), so it tries to resolve WasmFuncRef in
-        # base.tq:1099 and aborts: `Torque Error: cannot find "WasmFuncRef"`. Setting the
-        # declare_arg explicitly (it defaults to "") forces it OFF for BOTH host and target
-        # toolchains, so the host torque's @if matches the target's excluded source set.
+        # HOST/TARGET LITE-MODE SKEW FIX (verified failure 2026-06-05): the iOS TARGET
+        # auto-derives v8_enable_lite_mode=true from target_os=="ios" +
+        # target_platform=="iphoneos" + use_blink==false (gni/v8.gni:167-174). But the
+        # HOST snapshot toolchain (//build/toolchain/...:clang_arm64, which builds
+        # `mksnapshot`/`torque` to RUN on the Mac) has target_os==host==mac, so it does
+        # NOT auto-derive lite mode and builds a NON-lite, WASM-enabled mksnapshot. That
+        # host mksnapshot then bakes a snapshot whose read-only/external-reference layout
+        # is WASM-enabled, and the jitless TARGET runtime REJECTS it at deserialize time
+        # (`Check failed: magic_number_ == SerializedData::kMagicNumber` in
+        # ReadOnlyDeserializer, inside Isolate::New — a snapshot-format mismatch, NOT the
+        # Abseil ODR). Setting v8_enable_lite_mode EXPLICITLY (a declare_arg, defaults "")
+        # forces lite mode ON for BOTH host and target toolchains, so the snapshot the
+        # host generates matches what the jitless target expects. This also drives
+        # v8_jitless / turbofan-off / wasm-off consistently across toolchains.
+        'v8_enable_lite_mode=true',
+        # WASM stays explicitly off too. With lite_mode forced on both toolchains this is
+        # now implied, but keep it explicit: it ALSO fixes a Torque host/target skew —
+        # the wasm *.tq files (wasm-objects.tq, WasmFuncRef) are excluded from the target
+        # Torque source set, and a non-lite host `torque` with -DV8_ENABLE_WEBASSEMBLY
+        # would @if(V8_ENABLE_WEBASSEMBLY)==true and abort `cannot find "WasmFuncRef"`
+        # (base.tq:1099). Off for both toolchains keeps host torque's @if matching the
+        # target's excluded sources.
         'v8_enable_webassembly=false',
         # v8_enable_pointer_compression stays false (inherited from common) — matches the
         # desktop D3 OFF posture and the V8 iOS doc.
