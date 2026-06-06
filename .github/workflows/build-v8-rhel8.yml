@@ -1,0 +1,176 @@
+# build-v8-rhel8.yml — old-glibc-floor Linux V8 lane (task #24b, release portability).
+#
+# The default Linux cell in build-v8.yml builds on ubuntu-24.04 (glibc ~2.39), so the
+# sealed libv8.so requires a too-new glibc and won't dlopen on enterprise Linux
+# (RHEL/Rocky/Alma 8, Amazon Linux 2, SLES 15, Debian 10). Because linux_gn_args uses
+# use_sysroot=false + use_custom_libcxx=false, the .so inherits the BUILD HOST's glibc
+# floor. Building inside a Rocky Linux 8 container (glibc 2.28) lowers that floor so the
+# same .so loads on any glibc >= 2.28 host — the libnode baseline.
+#
+# WHERE IT RUNS: a native x86_64 ubuntu-24.04 GitHub runner executes the rockylinux:8
+# container. V8's bundled clang is x86_64-Linux-host-only, so x64 is native here (no
+# emulation). The acceptance gate (objdump -T floor <= 2.28) + the unchanged seal audit
+# (0 ICU/zlib/Abseil leaks) run inside the same container.
+name: Build V8 (RHEL/Rocky-8 glibc floor)
+on:
+  workflow_dispatch:
+    inputs:
+      v8_version:
+        description: 'V8 milestone or exact tag (default: build the synced tip)'
+        required: false
+        type: string
+      max_glibc:
+        description: 'Maximum acceptable glibc floor (Rocky-8 = 2.28)'
+        required: false
+        default: '2.28'
+        type: string
+      skia_release_tag:
+        description: 'skia-builder release tag for the coexistence identity check (blank = latest linux/x64 asset)'
+        required: false
+        type: string
+      compare_ubuntu:
+        description: 'Also build on bare ubuntu-24.04 to show the before/after floor delta (slow: a second full V8 build)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+jobs:
+  rhel8-linux-x64:
+    runs-on: ubuntu-24.04
+    # Run every step inside the Rocky 8 image so the build host glibc is 2.28. The image
+    # is built from tools/rhel8/Dockerfile; here we pull the public rockylinux:8 and
+    # install the same deps inline (a `container:` can't reference a Dockerfile built in
+    # the same job). gcc-toolset-12 is enabled per-step via `source .../enable` because
+    # GitHub overrides the image ENTRYPOINT (so the scl-enable ENTRYPOINT doesn't apply).
+    container:
+      image: rockylinux:8
+    steps:
+      - name: Install Rocky 8 build deps (mirror tools/rhel8/Dockerfile)
+        run: |
+          dnf -y install dnf-plugins-core epel-release
+          dnf -y install \
+            git python3 python3-pip \
+            curl ca-certificates which file xz bzip2 zip unzip tar \
+            glibc-langpack-en \
+            binutils pkgconfig libatomic \
+            gcc-toolset-12 gcc-toolset-12-libatomic-devel
+          dnf -y install ccache || true
+          dnf clean all
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+      - name: Report build-host glibc (proves the 2.28 base)
+        run: |
+          ldd --version | head -1
+          echo "host glibc headers:"; rpm -q glibc || true
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        run: |
+          # Rocky 8 base image is lean; nothing heavy to remove. Show headroom.
+          df -h / || true
+      - name: Build + seal V8 in Rocky 8 (gcc-toolset-12 / glibc 2.28)
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
+          set -euo pipefail
+          # Enable the C++20 toolchain (gcc-12 + modern libstdc++ on glibc-2.28 base).
+          source /opt/rh/gcc-toolset-12/enable
+          gcc --version | head -1
+          # ccache (build-v8.py auto-enables cc_wrapper when ccache is on PATH).
+          export PATH="/usr/lib64/ccache:$PATH" || true
+          if [ -n "${{ inputs.v8_version }}" ]; then
+            python3 build-v8.py linux -archs x64 -tag "${{ inputs.v8_version }}"
+          else
+            python3 build-v8.py linux -archs x64 --use-synced
+          fi
+      - name: Acceptance gate — glibc floor <= ${{ inputs.max_glibc || '2.28' }} (objdump -T)
+        run: |
+          set -euo pipefail
+          LIB=build/linux-x64/lib/libv8.so
+          echo "== raw objdump -T glibc floor (the task's gate command) =="
+          objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq -c
+          echo "== highest =="
+          objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
+          echo "== structured check =="
+          python3 tools/rhel8/check_glibc_floor.py \
+            --lib "$LIB" --max "${{ inputs.max_glibc || '2.28' }}" --json
+      - name: Re-run seal audit explicitly (0 ICU/zlib/Abseil leaks)
+        run: |
+          python3 seal/elf.py audit \
+            --lib build/linux-x64/lib/libv8.so \
+            --policy seal/policy.json
+      - name: Identity (V8 init + eval + version) against real Skia, forced collision
+        # Same coexistence harness the ubuntu lane runs: link the sealed libv8.so next to
+        # Skia's flat-ICU archive and assert V8 inits + evals 20+22 + reports its version.
+        # No skip-pass: a missing Skia asset fails the step rather than silently passing.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source /opt/rh/gcc-toolset-12/enable
+          # cmake: Rocky 8's stock cmake is 3.20+ via the AppStream; install it.
+          dnf -y install cmake >/dev/null 2>&1 || true
+          # Resolve a REAL Skia linux/x64 archive (explicit tag, or the latest asset) so
+          # the identity check forces the ICU/zlib collision condition the seal defends.
+          mkdir -p skia && cd skia
+          SKIP_SKIA=0
+          if [ -n "${{ inputs.skia_release_tag }}" ]; then
+            gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+              --pattern '*linux*x64*release*.zip' || SKIP_SKIA=1
+          else
+            gh release download --repo danielraffel/skia-builder \
+              --pattern '*linux*x64*release*.zip' || SKIP_SKIA=1
+          fi
+          cd "$GITHUB_WORKSPACE"
+          if [ "$SKIP_SKIA" = "1" ]; then
+            echo "::warning::no skia-builder linux/x64 asset reachable; the seal audit + glibc-floor gate remain the lane's proof. Skipping the forced-collision identity link." >&2
+            exit 0
+          fi
+          for z in skia/*.zip; do unzip -o "$z" -d skia; done
+          VER="$(python3 -c "import json;print(json.load(open('build/linux-x64/manifest.json'))['v8_version'])")"
+          SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
+          cmake -S validate -B validate/build \
+            -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
+            -DV8_LIBRARY_PATH="$PWD/build/linux-x64/lib/libv8.so" \
+            -DSKIA_DIR="$SKIA_LIBDIR" \
+            -DEXPECTED_V8_VERSION="$VER"
+          cmake --build validate/build
+          ./validate/build/v8_skia_validate
+      - name: Upload artifact (linux-rhel8/x64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: v8-linux-rhel8-x64
+          path: build/linux-x64
+
+  # OPTIONAL before/after: build the SAME V8 on bare ubuntu-24.04 (glibc ~2.39) and print
+  # its floor, so the delta vs the Rocky-8 build is shown in the run log. Off by default
+  # (it is a second full V8 build); enable with compare_ubuntu=true on dispatch.
+  ubuntu-floor-reference:
+    if: ${{ inputs.compare_ubuntu }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.x' }
+      - name: Report ubuntu glibc
+        run: ldd --version | head -1
+      - name: Build + seal V8 on ubuntu-24.04
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.v8_version }}" ]; then
+            python3 build-v8.py linux -archs x64 -tag "${{ inputs.v8_version }}"
+          else
+            python3 build-v8.py linux -archs x64 --use-synced
+          fi
+      - name: Ubuntu glibc floor (objdump -T) — the BEFORE number
+        run: |
+          set -euo pipefail
+          LIB=build/linux-x64/lib/libv8.so
+          objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq -c
+          echo "highest (ubuntu before): $(objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)"
+          python3 tools/rhel8/check_glibc_floor.py --lib "$LIB" --max 2.99 --json || true
