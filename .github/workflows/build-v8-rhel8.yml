@@ -55,14 +55,19 @@ jobs:
         run: |
           dnf -y install dnf-plugins-core epel-release
           dnf -y install \
-            git python3 python3-pip \
+            git python3.11 python3.11-pip \
             curl ca-certificates which file xz bzip2 zip unzip tar \
             glibc-langpack-en \
             binutils pkgconfig libatomic \
             gcc-toolset-12 gcc-toolset-12-libatomic-devel
           dnf -y install ccache || true
           dnf clean all
-          ln -sf /usr/bin/python3 /usr/local/bin/python
+          # Rocky 8's default python3 is 3.6, but V8/depot_tools build scripts use 3.8+
+          # syntax (e.g. bare @functools.lru_cache → "Expected maxsize to be an integer").
+          # Make python3.11 the python3/python on PATH so gn/ninja/build-v8.py all use it.
+          ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+          ln -sf /usr/bin/python3.11 /usr/local/bin/python
+          python3 --version
       - name: Report build-host glibc (proves the 2.28 base)
         run: |
           ldd --version | head -1

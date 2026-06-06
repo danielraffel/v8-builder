@@ -39,7 +39,7 @@ FROM rockylinux:8
 #   ccache              — optional build-object cache (build-v8.py auto-detects it)
 RUN dnf -y install dnf-plugins-core epel-release \
  && dnf -y install \
-      git python3 python3-pip \
+      git python3.11 python3.11-pip \
       curl ca-certificates which file xz bzip2 zip unzip tar \
       glibc-langpack-en \
       binutils pkgconfig libatomic \
@@ -51,9 +51,11 @@ ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     DEPOT_TOOLS_UPDATE=1
 
-# depot_tools' fetch/gclient want python3 reachable as `python`. Rocky 8 ships
-# only python3, so expose the alias on PATH.
-RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+# Rocky 8's default python3 is 3.6, but V8/depot_tools build scripts use 3.8+ syntax
+# (bare @functools.lru_cache → "Expected maxsize to be an integer"). Make python3.11 the
+# python3/python on PATH (/usr/local/bin precedes /usr/bin) so gn/ninja/build-v8.py use it.
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+ && ln -sf /usr/bin/python3.11 /usr/local/bin/python
 
 WORKDIR /work
 
