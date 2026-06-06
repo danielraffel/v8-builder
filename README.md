@@ -52,15 +52,59 @@ real Skia build.
 
 | Platform | Intel (x64) | ARM (arm64) |
 |----------|-------------|-------------|
-| macOS    | in progress | ✅ validated |
-| Linux    | ✅ validated | ✅ validated |
-| Windows  | ✅ validated | ✅ validated |
-| iOS      | planned (jitless) | planned (jitless) |
-| Android  | planned     | in progress |
+| macOS    | ✅ released  | ✅ released  |
+| Linux    | ✅ released  | ✅ released  |
+| Windows  | ✅ released  | ✅ released  |
+| Android  | —           | ✅ released  |
+| iOS      | —           | ✅ proven ¹  |
 
-V8 15.1; Intl on. Pointer compression is **off** on macOS/Linux (for drop-in parity with
-`libnode`-style consumers) and **on** on Windows (V8's supported default there) — a
-consumer must match, see below.
+All six desktop cells ship in the [latest release](../../releases/latest), built fresh and
+**single-SHA gated** in one sweep (no mixed-revision release), each validated for coexistence
+against the paired Skia. Android (`arm64-v8a`) ships sealed + identity-checked on a real
+emulator.
+
+¹ **iOS** is jitless (lite mode) and ships as a `V8.framework` rather than a plain library —
+the **simulator-arm64** slice is proven (the sealed framework prevents the V8↔Dawn Abseil ODR
+on iOS: gate showed 725 collision partners resident, V8 init + eval, no abort) and is the one
+in the release; the **device-arm64** slice builds with your Apple signing identity. The two
+mobile "—" cells aren't targets: Android is arm64-only (`arm64-v8a`), and the Intel iOS
+simulator is deferred (all-Apple-silicon fleet).
+
+V8 15.1; Intl on (off on iOS). Pointer compression is **off** on macOS/Linux (for drop-in
+parity with `libnode`-style consumers) and **on** on Windows (V8's supported default there);
+Windows + Android consumers also link a Chromium-style `__Cr` libc++ — a consumer must match,
+see below.
+
+## What a build produces
+
+Every cell runs the same pipeline — `build-v8.py <platform> -archs <arch>` → sync V8 →
+`gn`/`ninja` the static `v8_monolith` → `seal/<platform>.py` wraps it into a sealed shared
+library → audit (0 ICU/zlib/Abseil exports) → package. Each release artifact is a
+`v8-<platform>-<arch>-<ver>.zip` containing:
+
+```
+include/                # the v8::/cppgc:: public headers (the embedder API)
+lib/libv8.{dylib,so}    # macOS/Linux: the sealed shared library
+    v8.dll + v8.dll.lib # Windows: sealed DLL + import lib
+    V8.framework/       # iOS: the sealed framework (binary + headers + Info.plist)
+manifest.json           # exact V8 revision, arch, ABI flags, and the Skia release it
+                        #   was validated against (the co-validated pair)
+```
+
+A multi-platform release is **single-SHA gated**: every artifact must name the same V8
+revision, or the release is rejected — so a downloaded set is never mixed-revision.
+
+## Automatic releases
+
+A scheduled workflow ([`release-watch.yml`](.github/workflows/release-watch.yml)) polls
+upstream V8 tags weekly and, when a version newer than the last published release appears,
+dispatches the full all-platform sweep (build → seal → single-SHA gate) for that version and
+opens a tracking issue. It's **build-and-hold by default** (you review the run, then publish);
+set the repo variable `V8_WATCH_AUTOPUBLISH=true` to publish automatically. You can also run it
+on demand from the Actions tab, optionally forcing a specific version. Because coexistence is
+ABI + seal rather than version-matching (see below), a V8 bump reuses the current Skia pin
+(`V8_WATCH_SKIA_TAG`) unchanged. *Note: the macOS and `linux-arm64` cells build on self-hosted
+runners, which must be online when a sweep fires.*
 
 ## How the seal works
 

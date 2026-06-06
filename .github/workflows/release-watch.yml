@@ -1,0 +1,88 @@
+# release-watch.yml — auto-trigger a full sealed-V8 sweep when V8 ships a newer version tag.
+#
+# WHAT IT DOES: on a schedule (and on demand), it finds the highest V8 version tag upstream,
+# compares it to the highest `v8-<ver>` release this repo has published, and — if upstream is
+# strictly newer — dispatches the normal `build-v8.yml` sweep (all platforms + single-SHA gate)
+# for that version and opens a tracking issue.
+#
+# AUTO-PUBLISH IS OFF BY DEFAULT (safe): scheduled runs build + validate but DON'T publish
+# (skip_release=true) and open an issue so a human reviews, then re-dispatches build-v8.yml with
+# skip_release=false to publish. To make scheduled runs auto-publish, set the repo VARIABLE
+# `V8_WATCH_AUTOPUBLISH=true`. The Skia pair is fixed (coexistence is ABI+seal, not version-match);
+# bump `V8_WATCH_SKIA_TAG` to change it.
+#
+# CADENCE: weekly by default (V8 tags many times a day — dev/beta/canary; weekly avoids churn while
+# still catching every meaningful bump since the comparison is to the last *published* version).
+# Note: this repo currently ships a tip/dev V8 (15.1.27) that is AHEAD of the latest tag, so the
+# watcher will stay quiet until upstream tags exceed it — that's correct (it never downgrades).
+
+name: V8 release watch
+on:
+  schedule:
+    - cron: '0 9 * * 1'        # Mondays 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'On a detected new version: publish (build+release) or hold (build, review, then publish)'
+        type: choice
+        default: hold
+        options: [hold, publish]
+      force_version:
+        description: 'Optional: force-dispatch a specific V8 version (skips the newer-than check)'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Detect latest V8 tag vs last published release
+        id: chk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FORCE="${{ inputs.force_version }}"
+          if [ -n "$FORCE" ]; then
+            echo "latest=$FORCE" >> "$GITHUB_OUTPUT"; echo "newer=yes" >> "$GITHUB_OUTPUT"
+            echo "forced V8 $FORCE"; exit 0
+          fi
+          # Highest upstream V8 4-part version tag (major.minor.build.patch). Single-line
+          # python on purpose — a multi-line `python3 -c` here breaks the YAML block scalar.
+          LATEST="$(curl -fsSL 'https://chromium.googlesource.com/v8/v8/+refs/tags/?format=JSON' | tail -c +6 | python3 -c 'import json,sys; t=json.load(sys.stdin); v=sorted([k for k in t if k.count(".")==3 and all(p.isdigit() for p in k.split("."))], key=lambda s:[int(x) for x in s.split(".")]); print(v[-1])')"
+          # Highest version this repo has published as a v8-<ver> release.
+          LAST="$(gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '[.[].tagName|select(startswith("v8-"))|ltrimstr("v8-")]|sort_by(split(".")|map(tonumber))|last // ""')"
+          echo "latest upstream tag: $LATEST | last published: ${LAST:-<none>}"
+          NEWER="$(LATEST="$LATEST" LAST="$LAST" python3 -c 'import os; a=[int(x) for x in os.environ["LATEST"].split(".")]; b=([int(x) for x in os.environ["LAST"].split(".")] if os.environ["LAST"] else [0]); n=max(len(a),len(b)); a+=[0]*(n-len(a)); b+=[0]*(n-len(b)); print("yes" if a>b else "no")')"
+          echo "newer=$NEWER" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch sweep + open tracking issue
+        if: steps.chk.outputs.newer == 'yes'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.chk.outputs.latest }}"
+          SKIA="${{ vars.V8_WATCH_SKIA_TAG || 'chrome/m150' }}"
+          # publish if manually requested OR repo var opts in; otherwise build+hold for review.
+          if [ "${{ inputs.mode }}" = "publish" ] || [ "${{ vars.V8_WATCH_AUTOPUBLISH }}" = "true" ]; then
+            SKIP=false; ACTION="build + PUBLISH"
+          else
+            SKIP=true;  ACTION="build + hold (review, then re-dispatch with skip_release=false to publish)"
+          fi
+          gh workflow run build-v8.yml --repo "${{ github.repository }}" \
+            -f platforms=all -f v8_version="$VER" -f skia_release_tag="$SKIA" -f skip_release="$SKIP"
+          gh issue create --repo "${{ github.repository }}" \
+            --title "V8 $VER available — auto-sweep dispatched ($ACTION)" \
+            --body "release-watch detected upstream V8 $VER (last published: ${{ steps.chk.outputs.last }}). Dispatched build-v8.yml (all platforms + single-SHA gate) for $VER against Skia $SKIA — mode: $ACTION. Watch it in the Actions tab. If mode is hold, review the run then re-dispatch build-v8.yml with skip_release=false to publish v8-$VER. Note: the macOS and linux-arm64 cells run on the self-hosted runners, so make sure those are online." || true
+
+      - name: No new version
+        if: steps.chk.outputs.newer == 'no'
+        run: echo "No newer V8 tag than the last published release. Nothing to do."
