@@ -39,13 +39,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15,     platform: mac,   arch: arm64,  build: 'mac -archs arm64' }
-          - { os: macos-15,     platform: mac,   arch: x86_64, build: 'mac -archs x86_64' }
-          - { os: ubuntu-24.04, platform: linux, arch: x64,    build: 'linux -archs x64' }
-          - { os: ubuntu-24.04, platform: linux, arch: arm64,  build: 'linux -archs arm64' }
-          - { os: windows-2022, platform: win,   arch: x64,    build: 'win -archs x64' }
-          - { os: windows-2022, platform: win,   arch: arm64,  build: 'win -archs arm64' }
-          - { os: ubuntu-24.04, platform: android, arch: arm64, build: 'android -archs arm64' }
+          # `cell` is the on-disk output id build-v8.py writes to (build/<cell>) and the
+          # artifact name suffix. It equals <platform>-<arch> for every platform EXCEPT
+          # iOS, which has a second axis (env) so its cell is ios-<env>-<arch>.
+          - { os: macos-15,     platform: mac,   arch: arm64,  cell: mac-arm64,             build: 'mac -archs arm64' }
+          - { os: macos-15,     platform: mac,   arch: x86_64, cell: mac-x86_64,            build: 'mac -archs x86_64' }
+          - { os: ubuntu-24.04, platform: linux, arch: x64,    cell: linux-x64,             build: 'linux -archs x64' }
+          - { os: ubuntu-24.04, platform: linux, arch: arm64,  cell: linux-arm64,           build: 'linux -archs arm64' }
+          - { os: windows-2022, platform: win,   arch: x64,    cell: win-x64,               build: 'win -archs x64' }
+          - { os: windows-2022, platform: win,   arch: arm64,  cell: win-arm64,             build: 'win -archs arm64' }
+          - { os: ubuntu-24.04, platform: android, arch: arm64, cell: android-arm64,        build: 'android -archs arm64' }
+          - { os: macos-15,     platform: ios,   arch: arm64,  cell: ios-simulator-arm64,   build: 'ios -archs arm64 --ios-env simulator' }
           # win/arm64 cross-builds on the x64 runner (clang-cl → arm64); its seal audit is
           # static, but the arm64 identity validator can't run on x64 — it runs on the local
           # arm64 Windows VM (win-local task). macOS x86_64/universal + Linux arm64: add next.
@@ -55,6 +59,12 @@ jobs:
           # No skia-builder android asset exists, so the coexistence proof is the seal +
           # DT_NEEDED audits (manifest coexistence=identity-only) — Skia download + cmake
           # validator are SKIPPED for android below.
+          # ios/arm64 (simulator) cross-builds on the macOS self-hosted runner with the host
+          # Xcode toolchain. It's jitless (target_os=ios ⇒ lite mode), produces a SEALED
+          # dynamic V8.framework (Mach-O export-table seal via seal/macho.py), and SKIPS the
+          # cmake coexistence harness: the macho seal audit is the coexistence guarantee, and
+          # the Simulator Abseil-ODR gate was already proven GO on feature/ios-lane. Skia
+          # download + cmake validator are SKIPPED for ios below (same shape as android/win).
     # Routing: macOS cells → the LOCAL self-hosted pool (Mac Studio / M5, `v8-build` label)
     # by default (GitHub-hosted macOS is too slow/queued; the local runners also have Rosetta
     # so mac x86_64 cross-validate works — set V8_MACOS_RUNS_ON_JSON='"macos-15"' to force a
@@ -128,8 +138,10 @@ jobs:
         # mac/linux only. Windows self-validates identity via the gn target; Android has NO
         # skia-builder asset (skia-builder publishes no skia-build-android-*), so it validates
         # identity-only and treats the seal + DT_NEEDED audits as the coexistence guarantee.
-        # Both skip the Skia coexistence harness.
-        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android' && !(matrix.platform == 'linux' && matrix.arch == 'arm64')
+        # iOS likewise skips the cmake coexistence harness — the macho seal audit is the
+        # coexistence guarantee and the Simulator ODR gate was proven on feature/ios-lane.
+        # All three skip the Skia coexistence harness.
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android' && matrix.platform != 'ios' && !(matrix.platform == 'linux' && matrix.arch == 'arm64')
         shell: bash
         run: |
           mkdir -p skia && cd skia
@@ -145,7 +157,10 @@ jobs:
         # run on the x86_64 runner. build-v8.py runs the android identity validator (adb
         # when a device is reachable; otherwise it bundles exe+libv8.so into the artifact's
         # validate/ for an offline arm64-emulator run). Seal + DT_NEEDED audits gate here.
-        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android' && !(matrix.platform == 'linux' && matrix.arch == 'arm64')
+        # iOS is SKIPPED here too: it produces a sealed V8.framework whose macho seal audit
+        # (run inside build-v8.py) is the coexistence guarantee; the Simulator Abseil-ODR
+        # gate (validate/ios/run_ios_gate.py) was already proven GO on feature/ios-lane.
+        if: steps.sel.outputs.go == 'true' && runner.os != 'Windows' && matrix.platform != 'android' && matrix.platform != 'ios' && !(matrix.platform == 'linux' && matrix.arch == 'arm64')
         shell: bash
         run: |
           # locate the dir holding Skia's static archives in the unzipped release.
@@ -172,11 +187,14 @@ jobs:
           cmake --build validate/build
           "${PRE[@]}" ./validate/build/v8_skia_validate
       - name: Upload artifact
+        # Use matrix.cell, not <platform>-<arch>: iOS writes build/ios-<env>-<arch>
+        # (e.g. build/ios-simulator-arm64) because it carries a second (env) axis. For the
+        # other platforms cell == <platform>-<arch>, so this is identical to before.
         if: steps.sel.outputs.go == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: v8-${{ matrix.platform }}-${{ matrix.arch }}
-          path: build/${{ matrix.platform }}-${{ matrix.arch }}
+          name: v8-${{ matrix.cell }}
+          path: build/${{ matrix.cell }}
 
   validate-all:
     # Intra-repo single-V8-SHA gate (task #29): every per-platform artifact in a sweep
@@ -229,7 +247,13 @@ jobs:
           for m in ms:
               d = json.load(open(m)); p = d.get("pair", {}) or {}
               skia = p.get("skia") or p.get("skia_release") or "—"
-              print(f"| {d.get('platform')} | {d.get('arch')} | {d.get('v8_version')} | "
+              plat = d.get('platform')
+              # iOS carries an env axis (device|simulator) and validates via the macho seal
+              # audit + Simulator ODR gate, not the Skia cmake harness — surface both.
+              if plat == 'ios':
+                  plat = f"ios ({d.get('ios_environment', '?')})"
+                  skia = 'seal+ODR gate'
+              print(f"| {plat} | {d.get('arch')} | {d.get('v8_version')} | "
                     f"{'yes' if d.get('sealed') else 'NO'} | {skia} |")
           print("\nEvery artifact in this release names the same V8 revision "
                 "(single-SHA gate). Each is build + seal-audited (0 ICU/zlib/Abseil "
