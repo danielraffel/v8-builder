@@ -626,8 +626,12 @@ class V8Build:
     #   Mach-O (mac/ios): `strip -x` removes non-global (local) symbols, keeps external/
     #     exported. The codesignature (if any) is invalidated by the edit, so re-sign
     #     ad-hoc (`codesign -f -s -`) — required before a sealed dylib/framework loads.
-    #   ELF (linux/android): `llvm-strip --strip-unneeded` drops .symtab + debug but KEEPS
-    #     .dynsym (the export table). Android uses the NDK llvm-strip from the DEPS NDK.
+    #   ELF (linux/android): plain `llvm-strip` (default = strip-all) drops .symtab + debug
+    #     but CANNOT remove the *allocated* .dynsym (the export table the dynamic linker
+    #     needs at runtime) — so the seal is preserved byte-for-byte. Do NOT use
+    #     `--strip-unneeded`: it PRUNES .dynsym (drops exports it thinks are internally
+    #     unused), which on libv8.so cut 136414 -> 68207 exports and tripped the seal gate
+    #     (CI 27055798398). Android uses the NDK llvm-strip from the DEPS NDK.
     #   Windows (PE): the .dll carries no embedded debug (PDB is separate and unshipped),
     #     so there is nothing to strip — no-op.
     def _strip_lib(self, lib):
@@ -646,7 +650,7 @@ class V8Build:
                 raise SystemExit(1)
         elif plat in ("linux", "android"):
             stripper = self._llvm_strip()
-            run([stripper, "--strip-unneeded", str(lib)], env=self.env)
+            run([stripper, str(lib)], env=self.env)  # default strip-all: drops .symtab+debug, keeps allocated .dynsym
         elif plat == "win":
             say("win: PE dll carries no embedded debug (PDB is separate, unshipped) — "
                 "no strip needed", Colors.WARN)
