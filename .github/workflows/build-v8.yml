@@ -26,6 +26,11 @@ on:
         required: false
         default: true
         type: boolean
+      force_github_runners:
+        description: 'Force GitHub-hosted runners (ignore self-hosted vars for this run)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}-${{ inputs.platforms }}
@@ -34,7 +39,64 @@ permissions:
   contents: write
 
 jobs:
+  # ── Resolve runners ─────────────────────────────────────────────────────────────────
+  # GitHub-hosted by DEFAULT so a fork builds with zero setup. If you have your own
+  # (faster) runners, opt in by setting repo VARIABLES (Settings → Secrets and variables →
+  # Actions → Variables) — no edits to this file:
+  #   V8_MACOS_RUNS_ON_JSON        e.g. ["self-hosted","macOS","ARM64","v8-build"]
+  #   V8_LINUX_ARM64_RUNS_ON_JSON  e.g. ["self-hosted","Linux","ARM64","v8-build-linux"]
+  # Each is a JSON runs-on value (a "label" string or a labels array).
+  #   • Unset → GitHub-hosted: macOS → macos-15; linux/arm64 → ubuntu-24.04, where it
+  #     CROSS-compiles (host x64 → target arm64, no emulation — V8's bundled toolchain is
+  #     x86_64-host and runs natively on an x64 host; build + seal-audit + strip are all
+  #     cross-capable).
+  #   • Set → use those runners. AUTO-FALLBACK to GitHub when the runner is offline requires
+  #     an OPTIONAL `RUNNER_STATUS_TOKEN` secret (a PAT with Administration:read — the default
+  #     GITHUB_TOKEN can't list runners). Without that PAT the configured runners are trusted;
+  #     use the `force_github_runners` dispatch input to fall back to GitHub manually.
+  resolve-runners:
+    runs-on: ubuntu-24.04
+    outputs:
+      macos: ${{ steps.r.outputs.macos }}
+      linux_arm64: ${{ steps.r.outputs.linux_arm64 }}
+    steps:
+      - id: r
+        env:
+          # OPTIONAL: a PAT with "Administration: read" enables the runner-ONLINE check +
+          # auto-fallback (the default GITHUB_TOKEN cannot list self-hosted runners). Without
+          # it, configured runners are TRUSTED — use the `force_github_runners` dispatch input
+          # to fall back manually when they're down.
+          STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          MAC_PREF: ${{ vars.V8_MACOS_RUNS_ON_JSON }}
+          LARM_PREF: ${{ vars.V8_LINUX_ARM64_RUNS_ON_JSON }}
+          FORCE_GH: ${{ inputs.force_github_runners }}
+        run: |
+          set -euo pipefail
+          # No preference set (fork) → GitHub-hosted fallback, no API call.
+          # force_github_runners=true → GitHub fallback (manual override, no PAT needed).
+          # PAT set → route to self-hosted only if a matching runner is ONLINE, else fallback.
+          # No PAT → trust the configured runners (can't query status without admin access).
+          resolve() {
+            pref="$1"; fallback="$2"
+            [ -z "$pref" ] && { echo "$fallback"; return; }
+            [ "${FORCE_GH:-}" = "true" ] && { echo "$fallback"; return; }
+            [ -z "${STATUS_TOKEN:-}" ] && { echo "$pref"; return; }
+            label="$(printf '%s' "$pref" | python3 -c 'import json,sys; a=json.load(sys.stdin); print(a[-1] if isinstance(a,list) else a)')"
+            online="$(GH_TOKEN="$STATUS_TOKEN" gh api "repos/${{ github.repository }}/actions/runners" --paginate \
+              --jq "[.runners[]|select(.status==\"online\" and (.labels|map(.name)|index(\"$label\")))]|length" 2>/dev/null || echo 0)"
+            if [ "${online:-0}" -gt 0 ]; then echo "$pref"; else
+              echo "::notice::self-hosted '$label' offline — falling back to GitHub-hosted $fallback"
+              echo "$fallback"
+            fi
+          }
+          MAC="$(resolve "${MAC_PREF:-}" '"macos-15"')"
+          LARM="$(resolve "${LARM_PREF:-}" '"ubuntu-24.04"')"
+          echo "macos=$MAC" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$LARM" >> "$GITHUB_OUTPUT"
+          echo "resolved → macOS=$MAC  linux/arm64=$LARM"
+
   build-v8:
+    needs: resolve-runners
     strategy:
       fail-fast: false
       matrix:
@@ -65,14 +127,11 @@ jobs:
           # cmake coexistence harness: the macho seal audit is the coexistence guarantee, and
           # the Simulator Abseil-ODR gate was already proven GO on feature/ios-lane. Skia
           # download + cmake validator are SKIPPED for ios below (same shape as android/win).
-    # Routing: macOS cells → the LOCAL self-hosted pool (Mac Studio / M5, `v8-build` label)
-    # by default (GitHub-hosted macOS is too slow/queued; the local runners also have Rosetta
-    # so mac x86_64 cross-validate works — set V8_MACOS_RUNS_ON_JSON='"macos-15"' to force a
-    # cell back onto GitHub for a workflow-validation run). linux/arm64 → the self-hosted
-    # Rosetta-VM Linux runner (`v8-build-linux`), the proven host (V8's toolchain is
-    # x86_64-host-only, so arm64 Linux builds the x86_64 toolchain under Rosetta there).
-    # Everything else stays GitHub-hosted.
-    runs-on: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && fromJSON('["self-hosted","Linux","ARM64","v8-build-linux"]') || (startsWith(matrix.os, 'macos') && fromJSON(vars.V8_MACOS_RUNS_ON_JSON || '["self-hosted","macOS","ARM64","v8-build"]')) || matrix.os }}
+    # Routing comes from the resolve-runners job above: macOS + linux/arm64 use your
+    # self-hosted runners when configured AND online, else GitHub-hosted (macos-15 /
+    # ubuntu-24.04). Everything else is always GitHub-hosted. See resolve-runners for the
+    # opt-in repo variables.
+    runs-on: ${{ (matrix.platform == 'linux' && matrix.arch == 'arm64') && fromJSON(needs.resolve-runners.outputs.linux_arm64) || (startsWith(matrix.os, 'macos') && fromJSON(needs.resolve-runners.outputs.macos)) || matrix.os }}
     steps:
       - name: Select (exact, not substring)
         id: sel
@@ -97,6 +156,15 @@ jobs:
       - name: Free disk space (Linux)
         if: steps.sel.outputs.go == 'true' && runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: arm64 cross sysroot (linux/arm64 on an x64 GitHub runner)
+        # Cross-compiling arm64 on the x64 runner with use_sysroot=false uses the host's
+        # headers, which lack the arm64 multiarch bits (→ "bits/wordsize.h file not found").
+        # crossbuild-essential-arm64 installs a MODERN arm64 sysroot (ubuntu-24.04 glibc/
+        # libstdc++ → C++20-capable, unlike V8's old bundled sysroot) under
+        # /usr/aarch64-linux-gnu, which clang --target=aarch64-linux-gnu auto-discovers.
+        # Native arm64 hosts (self-hosted VM) already have these and skip this (github-hosted).
+        if: steps.sel.outputs.go == 'true' && matrix.platform == 'linux' && matrix.arch == 'arm64' && runner.environment == 'github-hosted'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq crossbuild-essential-arm64
       - name: Set up ccache (build-v8.py auto-enables cc_wrapper when ccache is in PATH)
         if: steps.sel.outputs.go == 'true'
         shell: bash

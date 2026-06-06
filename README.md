@@ -123,8 +123,27 @@ opens a tracking issue. It's **build-and-hold by default** (you review the run, 
 set the repo variable `V8_WATCH_AUTOPUBLISH=true` to publish automatically. You can also run it
 on demand from the Actions tab, optionally forcing a specific version. Because coexistence is
 ABI + seal rather than version-matching (see below), a V8 bump reuses the current Skia pin
-(`V8_WATCH_SKIA_TAG`) unchanged. *Note: the macOS and `linux-arm64` cells build on self-hosted
-runners, which must be online when a sweep fires.*
+(`V8_WATCH_SKIA_TAG`) unchanged.
+
+## Runners — works on a fork with zero setup
+
+Every cell builds on a **standard GitHub-hosted runner by default**, so a fork can run the
+workflow as-is. macOS → `macos-15`; **linux-arm64 cross-compiles on `ubuntu-24.04`** (x64 host
+→ arm64 target — V8's bundled toolchain is x86_64-host and runs natively on an x64 host, so no
+emulation; build + seal + strip are all cross-capable).
+
+If you have your own (faster) runners, opt in by setting repo **variables** — no file edits:
+
+| Variable | Example value |
+|---|---|
+| `V8_MACOS_RUNS_ON_JSON` | `["self-hosted","macOS","ARM64","v8-build"]` |
+| `V8_LINUX_ARM64_RUNS_ON_JSON` | `["self-hosted","Linux","ARM64","v8-build-linux"]` |
+
+A `resolve-runners` job routes to those runners. For **auto-fallback to GitHub when a runner
+is offline** (so a sweep never queues forever), also add an optional `RUNNER_STATUS_TOKEN`
+secret — a PAT with `Administration: read` (the default token can't query runner status).
+Without it, the configured runners are trusted; pass the **`force_github_runners`** dispatch
+input to fall back to GitHub manually for one run.
 
 ## How the seal works
 
