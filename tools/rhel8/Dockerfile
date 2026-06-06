@@ -57,6 +57,10 @@ ENV LANG=en_US.UTF-8 \
 RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
  && ln -sf /usr/bin/python3.11 /usr/local/bin/python
 
+# V8s bundled toolchain (bindgen, clang) needs GLIBCXX_3.4.26+ which Rocky 8s system
+# libstdc++ lacks; register gcc-toolset-12s libstdc++ system-wide so they resolve it.
+RUN echo /opt/rh/gcc-toolset-12/root/usr/lib64 > /etc/ld.so.conf.d/gcc-toolset-12.conf && ldconfig
+
 WORKDIR /work
 
 # Enable gcc-toolset-12 for every RUN/entrypoint shell so use_custom_libcxx=false
