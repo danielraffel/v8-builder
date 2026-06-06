@@ -81,6 +81,30 @@ def _exported_symbols(lib):
     return names
 
 
+def classify_exports(exported, deny):
+    """Pure classifier (no I/O — unit-testable). Given the list of exported symbol
+    names and the deny-substring list, return (leaks, denied, v8_count).
+
+    - leaks   : exports NOT on the v8::/cppgc:: allow-list (the primary, unfakeable gate).
+    - denied  : deny substrings found in symbols that ALSO failed the allow-list. The
+                deny scan is applied ONLY to non-allowed symbols, because a legitimately
+                sealed `v8::`/`cppgc::` export can carry an Abseil/ICU type in its
+                *parameter* mangling (e.g. `v8::internal::CppGraphBuilder::Run(...
+                absl::flat_hash_set<...>)` → `__ZN2v88internal...N4absl13flat_hash_set...`).
+                Substring-scanning such a name for "absl" would false-positive on a real
+                V8 ABI method. The allow-list already vouches for it, so the deny-list is
+                only a clearer-message backstop for symbols that escaped the allow-list.
+    - v8_count: number of exports in the v8:: namespace (sanity: must be > 0).
+    """
+    allowed = [s for s in exported if s.startswith(EXPORT_ALLOW_MANGLED)]
+    leaks = [s for s in exported if not s.startswith(EXPORT_ALLOW_MANGLED)]
+    denied = sorted({d for d in deny for s in leaks if d in s})
+    v8_count = sum(1 for s in allowed
+                   if s.startswith(("__ZN2v8", "__ZNK2v8", "__ZTVN2v8",
+                                    "__ZTIN2v8", "__ZTSN2v8")))
+    return leaks, denied, v8_count
+
+
 def audit(lib, policy_path):
     pol = json.loads(Path(policy_path).read_text())
     deny = pol["audit"]["must_be_zero_global"]
@@ -89,11 +113,12 @@ def audit(lib, policy_path):
         print(f"[seal/macho] AUDIT FAIL — no exported symbols in {lib}", file=sys.stderr)
         raise SystemExit(1)
 
+    leaks, denied, v8_count = classify_exports(exported, deny)
+
     # ALLOW-LIST (primary, unfakeable): every exported symbol MUST be on the
     # v8::/cppgc:: embedder ABI. Anything else is a seal leak. nm may also list a few
     # linker-synthesized symbols on Mach-O; none of those start with `__ZN2v8`/`__ZN6cppgc`,
     # so the allow-list correctly rejects an unsealed image.
-    leaks = [s for s in exported if not s.startswith(EXPORT_ALLOW_MANGLED)]
     if leaks:
         from collections import Counter
         import re as _re
@@ -109,15 +134,11 @@ def audit(lib, policy_path):
         raise SystemExit(1)
 
     # DENY-LIST (defense-in-depth + clearer message if a known internal ever appears).
-    denied = sorted({d for d in deny for s in exported if d in s})
     if denied:
         print(f"[seal/macho] AUDIT FAIL — exported denied internals: {denied}",
               file=sys.stderr)
         raise SystemExit(1)
 
-    v8_count = sum(1 for s in exported
-                   if s.startswith(("__ZN2v8", "__ZNK2v8", "__ZTVN2v8",
-                                    "__ZTIN2v8", "__ZTSN2v8")))
     if v8_count == 0:
         print("[seal/macho] AUDIT FAIL — no v8 symbols exported", file=sys.stderr)
         raise SystemExit(1)
