@@ -96,7 +96,8 @@ def audit(lib, policy_path):
 
 def main():
     p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True  # py3.6 (Rocky 8) compat: required= kwarg is 3.7+
     s = sub.add_parser("seal"); s.add_argument("--monolith", required=True)
     s.add_argument("--out", required=True); s.add_argument("--policy", required=True)
     a = sub.add_parser("audit"); a.add_argument("--lib", required=True)

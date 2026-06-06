@@ -149,7 +149,8 @@ def def_gen(monolith, out):
 
 def main():
     p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True  # py3.6 (Rocky 8) compat: required= kwarg is 3.7+
     a = sub.add_parser("audit"); a.add_argument("--lib", required=True)
     a.add_argument("--policy", required=True)
     d = sub.add_parser("def-gen"); d.add_argument("--monolith", required=True)

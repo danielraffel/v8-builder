@@ -127,7 +127,8 @@ def audit(lib, policy_path):
 
 def main():
     p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True  # py3.6 (Rocky 8) compat: required= kwarg is 3.7+
     v = sub.add_parser("version-script"); v.add_argument("--out", required=True)
     a = sub.add_parser("audit"); a.add_argument("--lib", required=True); a.add_argument("--policy", required=True)
     args = p.parse_args()
