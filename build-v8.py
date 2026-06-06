@@ -105,6 +105,69 @@ def mac_gn_args(arch):
     ]
 
 
+def ios_gn_args(arch, env="device", deployment_target="16.4", i18n=False):
+    # iOS (jitless) cross-build on the Mac host — exploratory lane (#32).
+    #
+    # JITLESS IS AUTOMATIC, NOT HAND-SET. target_os=="ios" + target_platform=="iphoneos"
+    # + use_blink==false (==!is_ios) drives v8_enable_lite_mode=true (gni/v8.gni:167-174),
+    # which drives v8_jitless=true (BUILD.gn:439), which turns OFF TurboFan/Maglev/
+    # Sparkplug/WebAssembly. We do NOT hand-set v8_enable_lite_mode / v8_jitless /
+    # v8_enable_turbofan — those auto-derive correctly from target_os=ios + iphoneos.
+    # v8_enable_webassembly IS set explicitly below, but ONLY to fix a host/target
+    # toolchain skew (see the comment at that line), not to change the target posture —
+    # the target value is already false via lite mode. Ignition (the bytecode interpreter)
+    # stays ON, so the full ECMAScript language runs (enough for three.js; no WASM on iphoneos).
+    #
+    # INTL/i18n: common_gn_args() HARD-SETS v8_enable_i18n_support=true. Appending
+    # `=false` would be a GN DUPLICATE-ASSIGNMENT error (the same reason win_gn_args
+    # filters v8_enable_pointer_compression out of the common list before overriding).
+    # So we FILTER it out first, then set the iOS value. Gate default is Intl OFF
+    # (smaller binary, no ICU to seal, faster bring-up; Pulp uses no `Intl`); pass
+    # i18n=True for a general-audience iOS artifact (the seal handles ICU the same way).
+    base = [a for a in common_gn_args()
+            if not a.startswith("v8_enable_i18n_support")]
+    return base + [
+        f'target_cpu="{gn_cpu(arch)}"',         # arm64 (device|sim) | x64 (intel sim)
+        'target_os="ios"',
+        f'target_environment="{env}"',          # REQUIRED — mobile_config.gni asserts
+                                                #   it is one of device|simulator|catalyst.
+        'target_platform="iphoneos"',           # selects the lite-mode (jitless) branch
+        f'ios_deployment_target="{deployment_target}"',  # Pulp's iOS floor (16.4); V8
+                                                #   default is 18.0 (ios_sdk_overrides.gni).
+        'is_component_build=false',             # iOS doc + monolith both require non-component
+        'use_custom_libcxx=false',              # platform libc++ (matches Skia/Dawn-on-iOS)
+        f'v8_enable_i18n_support={"true" if i18n else "false"}',
+        # HOST/TARGET LITE-MODE SKEW FIX (verified failure 2026-06-05): the iOS TARGET
+        # auto-derives v8_enable_lite_mode=true from target_os=="ios" +
+        # target_platform=="iphoneos" + use_blink==false (gni/v8.gni:167-174). But the
+        # HOST snapshot toolchain (//build/toolchain/...:clang_arm64, which builds
+        # `mksnapshot`/`torque` to RUN on the Mac) has target_os==host==mac, so it does
+        # NOT auto-derive lite mode and builds a NON-lite, WASM-enabled mksnapshot. That
+        # host mksnapshot then bakes a snapshot whose read-only/external-reference layout
+        # is WASM-enabled, and the jitless TARGET runtime REJECTS it at deserialize time
+        # (`Check failed: magic_number_ == SerializedData::kMagicNumber` in
+        # ReadOnlyDeserializer, inside Isolate::New — a snapshot-format mismatch, NOT the
+        # Abseil ODR). Setting v8_enable_lite_mode EXPLICITLY (a declare_arg, defaults "")
+        # forces lite mode ON for BOTH host and target toolchains, so the snapshot the
+        # host generates matches what the jitless target expects. This also drives
+        # v8_jitless / turbofan-off / wasm-off consistently across toolchains.
+        'v8_enable_lite_mode=true',
+        # WASM stays explicitly off too. With lite_mode forced on both toolchains this is
+        # now implied, but keep it explicit: it ALSO fixes a Torque host/target skew —
+        # the wasm *.tq files (wasm-objects.tq, WasmFuncRef) are excluded from the target
+        # Torque source set, and a non-lite host `torque` with -DV8_ENABLE_WEBASSEMBLY
+        # would @if(V8_ENABLE_WEBASSEMBLY)==true and abort `cannot find "WasmFuncRef"`
+        # (base.tq:1099). Off for both toolchains keeps host torque's @if matching the
+        # target's excluded sources.
+        'v8_enable_webassembly=false',
+        # v8_enable_pointer_compression stays false (inherited from common) — matches the
+        # desktop D3 OFF posture and the V8 iOS doc.
+        # v8_monolithic_for_shared_library=true (from common) IS correct here: the iOS
+        # artifact is a sealed dynamic FRAMEWORK (a shared lib in a bundle), so the
+        # TLS-model define it sets is the right one for the -shared link.
+    ]
+
+
 def linux_gn_args(arch):
     return common_gn_args() + [
         f'target_cpu="{gn_cpu(arch)}"',         # x64 | arm64
@@ -254,7 +317,8 @@ def android_gn_args(arch, ndk_api_level=ANDROID_DEFAULT_NDK_API_LEVEL,
     return args
 
 
-def platform_gn_args(platform, arch, args=None):
+def platform_gn_args(platform, arch, args=None, ios_env="device",
+                     ios_deployment_target="16.4", ios_i18n=False):
     if platform == "mac":
         return mac_gn_args(arch)
     if platform == "linux":
@@ -268,6 +332,9 @@ def platform_gn_args(platform, arch, args=None):
         # which needs a full NDK (standalone libunwind.a) to link.
         bundled = not bool(getattr(args, "android_ndk_libcxx", False))
         return android_gn_args(arch, ndk_api_level=level, bundled_libcxx=bundled)
+    if platform == "ios":
+        return ios_gn_args(arch, env=ios_env,
+                           deployment_target=ios_deployment_target, i18n=ios_i18n)
     raise SystemExit(f"gn args for platform '{platform}' not implemented")
 
 
@@ -275,7 +342,7 @@ def platform_gn_args(platform, arch, args=None):
 # analog (version-script + --whole-archive), validated on CI (unprovable on macOS).
 SEAL_TARGET_GN = '''\
 # >>> v8-builder sealed-shared target (injected)
-if ((is_mac || is_linux || is_win || is_android) && v8_monolithic) {
+if ((is_mac || is_ios || is_linux || is_win || is_android) && v8_monolithic) {
   v8_shared_library("v8_sealed_shared") {
     output_name = "v8"
     sources = []
@@ -289,13 +356,25 @@ if ((is_mac || is_linux || is_win || is_android) && v8_monolithic) {
     } else {
       remove_configs = [ "//build/config/compiler:optimize_max" ]
     }
-    if (is_mac) {
+    if (is_mac || is_ios) {
+      # iOS Mach-O seals IDENTICALLY to macOS Mach-O: the export-table seal is
+      # -exported_symbols_list (only v8::/cppgc:: leave the dynamic export table;
+      # ICU/zlib/Abseil pulled via -force_load stay INTERNAL). This is the WHOLE point
+      # of the framework route over a static .a (which has no export table at all and
+      # would re-merge V8's Abseil into the final app link, recreating the ODR abort).
+      # The .dylib emitted here is wrapped into a sealed .framework bundle at package
+      # time (package_ios_framework). @rpath/V8.framework/V8 is the framework-shaped
+      # install name; the plain @rpath/libv8.dylib name is kept for the macOS dylib.
       inputs = [ "v8_embedder_exports.txt" ]
       ldflags = [
         "-Wl,-exported_symbols_list," + rebase_path("v8_embedder_exports.txt", root_build_dir),
-        "-Wl,-install_name,@rpath/libv8.dylib",
         "-Wl,-force_load," + rebase_path("$root_build_dir/obj/libv8_monolith.a", root_build_dir),
       ]
+      if (is_ios) {
+        ldflags += [ "-Wl,-install_name,@rpath/V8.framework/V8" ]
+      } else {
+        ldflags += [ "-Wl,-install_name,@rpath/libv8.dylib" ]
+      }
     } else if (is_win) {
       # PE/COFF: nothing is exported unless dllexport'd, so ICU/zlib/absl stay internal
       # by construction (v8_expose_public_symbols made V8_EXPORT=dllexport for v8::).
@@ -455,19 +534,31 @@ class V8Build:
         build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n", encoding="utf-8")
         say("injected v8_sealed_shared gn target")
 
+    def _cell_id(self, arch):
+        # iOS has TWO axes (env + arch) so its output/dist dir is ios-<env>-<arch>
+        # (e.g. ios-simulator-arm64). Other platforms keep <platform>-<arch>.
+        if self.args.platform == "ios":
+            return f"ios-{self.args.ios_env}-{arch}"
+        return f"{self.args.platform}-{arch}"
+
     def gn_gen(self, arch):
-        out = V8_DIR / "out" / f"{self.args.platform}-{arch}"
-        args_gn = "\n".join(platform_gn_args(self.args.platform, arch, self.args)) + "\n"
+        out = V8_DIR / "out" / self._cell_id(arch)
+        args_gn = "\n".join(platform_gn_args(
+            self.args.platform, arch, self.args,
+            ios_env=getattr(self.args, "ios_env", "device"),
+            ios_deployment_target=getattr(self.args, "ios_deployment_target", "16.4"),
+            ios_i18n=getattr(self.args, "ios_i18n", False))) + "\n"
         out.mkdir(parents=True, exist_ok=True)
         (out / "args.gn").write_text(args_gn, encoding="utf-8")
         say(f"args.gn:\n{args_gn}")
         run(["gn", "gen", str(out)], cwd=V8_DIR, env=self.env)
         return out
 
+    # iOS emits a dylib (output_name="v8" → libv8.dylib) that we wrap into V8.framework.
     LIBNAME = {"mac": "libv8.dylib", "linux": "libv8.so", "win": "v8.dll",
-               "android": "libv8.so"}
+               "android": "libv8.so", "ios": "libv8.dylib"}
     SEAL_BACKEND = {"mac": "macho.py", "linux": "elf.py", "win": "coff.py",
-                    "android": "elf.py"}
+                    "android": "elf.py", "ios": "macho.py"}
 
     def build_sealed(self, out, arch):
         run(["ninja", "-C", str(out), "v8_sealed_shared"], cwd=V8_DIR, env=self.env)
@@ -475,7 +566,7 @@ class V8Build:
         lib = out / libname
         if not lib.exists():
             raise SystemExit(f"expected sealed {lib} not produced")
-        dest = BUILD_DIR / f"{self.args.platform}-{arch}" / "lib"
+        dest = BUILD_DIR / self._cell_id(arch) / "lib"
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(lib, dest / libname)
         if self.args.platform == "win":
@@ -485,13 +576,57 @@ class V8Build:
                 shutil.copy2(implib, dest / "v8.dll.lib")
             else:
                 raise SystemExit(f"expected import lib {implib} not produced")
-        # audit: assert 0 absl/icu/zlib internals exported
+        # audit: assert 0 absl/icu/zlib internals exported. The seal is an export-table
+        # property of the dylib itself, so we audit the dylib (the framework just rehouses
+        # this exact binary as V8.framework/V8 — same Mach-O, same export table).
         backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
         run([sys.executable, str(backend), "audit", "--lib", str(dest / libname),
              "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
+        produced = dest / libname
         if self.args.platform == "android":
-            self._android_dt_needed_audit(dest / libname)
-        return dest / libname
+            self._android_dt_needed_audit(produced)
+        if self.args.platform == "ios":
+            produced = self.wrap_ios_framework(dest, produced, arch)
+        return produced
+
+    def wrap_ios_framework(self, dest, dylib, arch):
+        # Wrap the sealed dylib into a flat (iOS) V8.framework bundle:
+        #   V8.framework/V8            (the sealed Mach-O — install_name @rpath/V8.framework/V8)
+        #   V8.framework/Headers/      (V8 public headers)
+        #   V8.framework/Info.plist    (minimal CFBundle keys the loader/codesign expect)
+        # Flat layout (binary at the bundle root, no Versions/ symlink dir) is the iOS/
+        # tvOS convention; Versions/A is macOS-only. A loose .dylib is awkward to embed and
+        # codesign on iOS; a framework bundle is the blessed embeddable dynamic shape.
+        fw = dest.parent / "V8.framework"
+        if fw.exists():
+            shutil.rmtree(fw)
+        fw.mkdir(parents=True)
+        shutil.copy2(dylib, fw / "V8")
+        # Headers
+        shutil.copytree(V8_DIR / "include", fw / "Headers")
+        # Minimal Info.plist
+        plist = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            '  <key>CFBundleIdentifier</key><string>org.v8.V8</string>\n'
+            '  <key>CFBundleName</key><string>V8</string>\n'
+            '  <key>CFBundleExecutable</key><string>V8</string>\n'
+            '  <key>CFBundlePackageType</key><string>FMWK</string>\n'
+            f'  <key>MinimumOSVersion</key>'
+            f'<string>{getattr(self.args, "ios_deployment_target", "16.4")}</string>\n'
+            '  <key>CFBundleSupportedPlatforms</key><array><string>'
+            + ('iPhoneSimulator' if self.args.ios_env == 'simulator' else 'iPhoneOS')
+            + '</string></array>\n'
+            '</dict></plist>\n')
+        (fw / "Info.plist").write_text(plist, encoding="utf-8")
+        # Re-audit the framework binary (same export table; cheap belt-and-suspenders).
+        backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
+        run([sys.executable, str(backend), "audit", "--lib", str(fw / "V8"),
+             "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
+        say(f"wrapped sealed dylib into {fw}")
+        return fw
 
     # The export seal proves nothing LEAKS OUT; DT_NEEDED proves nothing UNWANTED is
     # required at load time. An android drop-in libv8.so should depend only on the
@@ -519,6 +654,22 @@ class V8Build:
         except Exception:
             return None
 
+    def _built_v8_version(self):
+        # The manifest's v8_version must reflect what was ACTUALLY built, not the
+        # requested --tag / DEFAULT_V8_TAG (which can drift from the checkout — e.g.
+        # the iOS lane builds the LKGR 15.1.27 checkout while the desktop default pin
+        # is still 14.6). Resolve the exact tag at the built SHA; fall back to the
+        # requested tag only if the checkout has no matching tag.
+        try:
+            tag = subprocess.run(
+                ["git", "describe", "--tags", "--exact-match", "HEAD"],
+                cwd=V8_DIR, capture_output=True, text=True).stdout.strip()
+            if tag:
+                return tag
+        except Exception:
+            pass
+        return self.tag
+
     def _lkgr_contract(self):
         # FR1 shared release-manifest contract: skia-builder AND v8-builder emit the SAME
         # fields naming the co-tested LKGR triple, so Pulp pairs the two releases by
@@ -537,17 +688,20 @@ class V8Build:
         return c
 
     def package(self, sealed, arch):
-        dest = BUILD_DIR / f"{self.args.platform}-{arch}"
+        dest = BUILD_DIR / self._cell_id(arch)
         inc = dest / "include"
         # V8 public headers (shutil, not rsync — rsync isn't on Windows runners)
         if inc.exists():
             shutil.rmtree(inc)
         shutil.copytree(V8_DIR / "include", inc)
+        is_ios = self.args.platform == "ios"
         manifest = {
-            "v8_version": self.tag,
+            "v8_version": self._built_v8_version(),
             "platform": self.args.platform,
             "arch": arch,
-            "i18n": True,
+            # On iOS, Intl defaults OFF for the gate (no ICU to seal); other platforms
+            # build Intl ON. Reflect the real build posture, not a hardcoded true.
+            "i18n": bool(getattr(self.args, "ios_i18n", False)) if is_ios else True,
             "shared": True,
             "sealed": not self.args.no_seal,
             "lib": str(Path(sealed).name),
@@ -577,6 +731,16 @@ class V8Build:
             jni = dest / "jniLibs" / manifest["abi"]
             jni.mkdir(parents=True, exist_ok=True)
             shutil.copy2(sealed, jni / Path(sealed).name)
+        elif is_ios:
+            # iOS-specific build-shape fields (review addendum point 5/6): a consumer must
+            # know it's a jitless, no-WASM, sealed framework before it links.
+            manifest.update({
+                "ios_environment": self.args.ios_env,      # device | simulator
+                "deployment_target": getattr(self.args, "ios_deployment_target", "16.4"),
+                "jitless": True,         # auto-derived from target_os=ios + iphoneos
+                "wasm": False,           # no JIT ⇒ no WebAssembly on iphoneos
+                "form": "framework",     # V8.framework (sealed dynamic), not static .a
+            })
         (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         say(f"packaged {dest}")
 
@@ -752,7 +916,7 @@ class V8Build:
         # (dllexport seal + /WHOLEARCHIVE) validates on a Windows runner — both unprovable
         # on a macOS host. Do not report a lane validated until its OS workflow runs green.
         default_arch = {"mac": "arm64", "linux": "x64", "win": "x64",
-                        "android": "arm64"}[self.args.platform]
+                        "android": "arm64", "ios": "arm64"}[self.args.platform]
         archs = (self.args.archs or default_arch).split(",")
         self.setup_depot_tools()
         self.fetch_v8()
@@ -787,7 +951,7 @@ class V8Build:
 
 def main():
     p = argparse.ArgumentParser(description="Build & seal standalone V8 for embedding next to Skia/Dawn")
-    p.add_argument("platform", choices=["mac", "linux", "win", "android"],
+    p.add_argument("platform", choices=["mac", "linux", "win", "android", "ios"],
                    help="Target platform")
     p.add_argument("-archs", help="Comma-separated archs (e.g. arm64,x86_64 / x64; "
                                    "android: arm64,x64,arm,x86)")
@@ -802,6 +966,13 @@ def main():
                    help="Android: attempt the NDK-libc++ target ABI (use_custom_libcxx=false) "
                         "instead of the default bundled (__Cr) libc++. Needs a FULL NDK with a "
                         "standalone libunwind.a — the DEPS cipd android_toolchain lacks it.")
+    # iOS-only knobs (exploratory jitless lane, #32).
+    p.add_argument("--ios-env", choices=["device", "simulator"], default="device",
+                   help="iOS target_environment (device|simulator). Default device.")
+    p.add_argument("--ios-deployment-target", default="16.4",
+                   help="iOS minimum OS (Pulp floor 16.4; V8 default is 18.0)")
+    p.add_argument("--ios-i18n", action="store_true",
+                   help="Build iOS with Intl/ICU ON (default OFF for the gate)")
     args = p.parse_args()
     b = V8Build(args)
     if args.fetch_only:

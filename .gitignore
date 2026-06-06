@@ -5,3 +5,6 @@ out/
 tmp/
 __pycache__/
 *.pyc
+
+# iOS gate build scratch
+validate/ios/work/
