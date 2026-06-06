@@ -139,9 +139,11 @@ If you have your own (faster) runners, opt in by setting repo **variables** — 
 | `V8_MACOS_RUNS_ON_JSON` | `["self-hosted","macOS","ARM64","v8-build"]` |
 | `V8_LINUX_ARM64_RUNS_ON_JSON` | `["self-hosted","Linux","ARM64","v8-build-linux"]` |
 
-A `resolve-runners` job checks whether a matching runner is actually **online** and routes
-there if so — otherwise it **falls back to GitHub-hosted**, so a sweep never queues forever on
-an offline self-hosted runner.
+A `resolve-runners` job routes to those runners. For **auto-fallback to GitHub when a runner
+is offline** (so a sweep never queues forever), also add an optional `RUNNER_STATUS_TOKEN`
+secret — a PAT with `Administration: read` (the default token can't query runner status).
+Without it, the configured runners are trusted; pass the **`force_github_runners`** dispatch
+input to fall back to GitHub manually for one run.
 
 ## How the seal works
 

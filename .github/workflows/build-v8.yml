@@ -26,6 +26,11 @@ on:
         required: false
         default: true
         type: boolean
+      force_github_runners:
+        description: 'Force GitHub-hosted runners (ignore self-hosted vars for this run)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}-${{ inputs.platforms }}
@@ -40,37 +45,47 @@ jobs:
   # Actions → Variables) — no edits to this file:
   #   V8_MACOS_RUNS_ON_JSON        e.g. ["self-hosted","macOS","ARM64","v8-build"]
   #   V8_LINUX_ARM64_RUNS_ON_JSON  e.g. ["self-hosted","Linux","ARM64","v8-build-linux"]
-  # Each is a JSON runs-on value (a "label" string or a labels array). This job checks
-  # whether a matching runner is actually ONLINE and routes there if so — otherwise it
-  # FALLS BACK to GitHub-hosted, so a sweep never queues forever on an offline runner.
-  # Defaults: macOS → macos-15; linux/arm64 → ubuntu-24.04 (where it CROSS-compiles, host
-  # x64 → target arm64, no emulation — V8's bundled toolchain is x86_64-host and runs
-  # natively on an x64 host; build + seal-audit + strip are all cross-capable).
+  # Each is a JSON runs-on value (a "label" string or a labels array).
+  #   • Unset → GitHub-hosted: macOS → macos-15; linux/arm64 → ubuntu-24.04, where it
+  #     CROSS-compiles (host x64 → target arm64, no emulation — V8's bundled toolchain is
+  #     x86_64-host and runs natively on an x64 host; build + seal-audit + strip are all
+  #     cross-capable).
+  #   • Set → use those runners. AUTO-FALLBACK to GitHub when the runner is offline requires
+  #     an OPTIONAL `RUNNER_STATUS_TOKEN` secret (a PAT with Administration:read — the default
+  #     GITHUB_TOKEN can't list runners). Without that PAT the configured runners are trusted;
+  #     use the `force_github_runners` dispatch input to fall back to GitHub manually.
   resolve-runners:
     runs-on: ubuntu-24.04
-    permissions:
-      administration: read   # read self-hosted runner online status (repo-level runners)
     outputs:
       macos: ${{ steps.r.outputs.macos }}
       linux_arm64: ${{ steps.r.outputs.linux_arm64 }}
     steps:
       - id: r
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # OPTIONAL: a PAT with "Administration: read" enables the runner-ONLINE check +
+          # auto-fallback (the default GITHUB_TOKEN cannot list self-hosted runners). Without
+          # it, configured runners are TRUSTED — use the `force_github_runners` dispatch input
+          # to fall back manually when they're down.
+          STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
           MAC_PREF: ${{ vars.V8_MACOS_RUNS_ON_JSON }}
           LARM_PREF: ${{ vars.V8_LINUX_ARM64_RUNS_ON_JSON }}
+          FORCE_GH: ${{ inputs.force_github_runners }}
         run: |
           set -euo pipefail
-          # Echo $pref if a runner carrying its most-specific label is ONLINE, else $fallback.
-          # No preference (fork) → fallback with no API call. API error → fallback (safe).
+          # No preference set (fork) → GitHub-hosted fallback, no API call.
+          # force_github_runners=true → GitHub fallback (manual override, no PAT needed).
+          # PAT set → route to self-hosted only if a matching runner is ONLINE, else fallback.
+          # No PAT → trust the configured runners (can't query status without admin access).
           resolve() {
             pref="$1"; fallback="$2"
-            if [ -z "$pref" ]; then echo "$fallback"; return; fi
+            [ -z "$pref" ] && { echo "$fallback"; return; }
+            [ "${FORCE_GH:-}" = "true" ] && { echo "$fallback"; return; }
+            [ -z "${STATUS_TOKEN:-}" ] && { echo "$pref"; return; }
             label="$(printf '%s' "$pref" | python3 -c 'import json,sys; a=json.load(sys.stdin); print(a[-1] if isinstance(a,list) else a)')"
-            online="$(gh api "repos/${{ github.repository }}/actions/runners" --paginate \
+            online="$(GH_TOKEN="$STATUS_TOKEN" gh api "repos/${{ github.repository }}/actions/runners" --paginate \
               --jq "[.runners[]|select(.status==\"online\" and (.labels|map(.name)|index(\"$label\")))]|length" 2>/dev/null || echo 0)"
             if [ "${online:-0}" -gt 0 ]; then echo "$pref"; else
-              echo "::notice::self-hosted '$label' offline/unconfigured — falling back to GitHub-hosted $fallback"
+              echo "::notice::self-hosted '$label' offline — falling back to GitHub-hosted $fallback"
               echo "$fallback"
             fi
           }
