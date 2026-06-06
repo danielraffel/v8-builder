@@ -164,6 +164,13 @@ Link against the library and its headers. The **ABI contract** a consumer must m
 - **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
   macOS/Linux/Android, on on Windows) — a mismatch makes `V8::Initialize` abort with an
   explicit embedder-vs-V8 message.
+- **Code signing (macOS/iOS):** the shipped `libv8.dylib` / `V8.framework` are **ad-hoc
+  (linker) signed** with no team identity — so you **re-sign them with your own** Developer
+  ID when you bundle them (`codesign --force --sign "Developer ID Application: …"`, or Xcode
+  signs the embedded framework automatically when you build your app). The iOS **device**
+  slice *requires* your signing; the **simulator** slice (shipped here) does not. The Windows
+  `v8.dll` is unsigned — Authenticode-sign it with your own cert if your distribution needs
+  it. Linux/Android `.so`s aren't signed (the Android consumer's APK signature covers it).
 
 Beyond that it's ordinary V8: create a platform, an isolate, a context, and run.
 
