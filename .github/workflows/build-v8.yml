@@ -156,6 +156,15 @@ jobs:
       - name: Free disk space (Linux)
         if: steps.sel.outputs.go == 'true' && runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: arm64 cross sysroot (linux/arm64 on an x64 GitHub runner)
+        # Cross-compiling arm64 on the x64 runner with use_sysroot=false uses the host's
+        # headers, which lack the arm64 multiarch bits (→ "bits/wordsize.h file not found").
+        # crossbuild-essential-arm64 installs a MODERN arm64 sysroot (ubuntu-24.04 glibc/
+        # libstdc++ → C++20-capable, unlike V8's old bundled sysroot) under
+        # /usr/aarch64-linux-gnu, which clang --target=aarch64-linux-gnu auto-discovers.
+        # Native arm64 hosts (self-hosted VM) already have these and skip this (github-hosted).
+        if: steps.sel.outputs.go == 'true' && matrix.platform == 'linux' && matrix.arch == 'arm64' && runner.environment == 'github-hosted'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq crossbuild-essential-arm64
       - name: Set up ccache (build-v8.py auto-enables cc_wrapper when ccache is in PATH)
         if: steps.sel.outputs.go == 'true'
         shell: bash
