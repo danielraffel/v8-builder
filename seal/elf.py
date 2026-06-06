@@ -84,6 +84,28 @@ def _exported_symbols(lib):
     return names
 
 
+def classify_exports(exported, deny):
+    """Pure classifier over a list of exported symbol names (no I/O).
+
+    Returns (leaks, denied, v8_count):
+      - leaks:   exports NOT on the v8::/cppgc:: allow-list (the seal leaks)
+      - denied:  sorted deny-list prefixes that matched some export (defense-in-depth)
+      - v8_count: number of exports on the v8:: ABI prefixes (must be > 0)
+
+    The audit() entry point layers fail-on-empty + SystemExit reporting on top of
+    this; tests call this directly to assert classification without a real .so.
+    """
+    # ALLOW-LIST (primary, unfakeable): every exported symbol MUST be on the
+    # v8::/cppgc:: embedder ABI. Anything else is a seal leak — including internals no
+    # deny-list named (the old deny-list missed icu's C++ namespace `_ZN6icu_` and let
+    # ~7742 icu + ~1972 absl template instantiations through; an allow-list cannot).
+    leaks = [s for s in exported if not s.startswith(EXPORT_ALLOW_MANGLED)]
+    denied = sorted({d for d in deny for s in exported if s.startswith(d)})
+    v8_count = sum(1 for s in exported if s.startswith(("_ZN2v8", "_ZNK2v8", "_ZTVN2v8",
+                                                        "_ZTIN2v8", "_ZTSN2v8")))
+    return leaks, denied, v8_count
+
+
 def audit(lib, policy_path):
     pol = json.loads(Path(policy_path).read_text())
     deny = pol["audit"]["must_be_zero_global"]
@@ -92,11 +114,7 @@ def audit(lib, policy_path):
         print(f"[seal/elf] AUDIT FAIL — no exported symbols in {lib}", file=sys.stderr)
         raise SystemExit(1)
 
-    # ALLOW-LIST (primary, unfakeable): every exported symbol MUST be on the
-    # v8::/cppgc:: embedder ABI. Anything else is a seal leak — including internals no
-    # deny-list named (the old deny-list missed icu's C++ namespace `_ZN6icu_` and let
-    # ~7742 icu + ~1972 absl template instantiations through; an allow-list cannot).
-    leaks = [s for s in exported if not s.startswith(EXPORT_ALLOW_MANGLED)]
+    leaks, denied, v8n = classify_exports(exported, deny)
     if leaks:
         from collections import Counter
         # bucket by the leading mangled namespace token for a readable report
@@ -111,13 +129,10 @@ def audit(lib, policy_path):
         raise SystemExit(1)
 
     # DENY-LIST (defense-in-depth + clearer message if a known internal ever appears).
-    denied = sorted({d for d in deny for s in exported if s.startswith(d)})
     if denied:
         print(f"[seal/elf] AUDIT FAIL — exported denied internals: {denied}", file=sys.stderr)
         raise SystemExit(1)
 
-    v8n = sum(1 for s in exported if s.startswith(("_ZN2v8", "_ZNK2v8", "_ZTVN2v8",
-                                                   "_ZTIN2v8", "_ZTSN2v8")))
     if v8n == 0:
         print("[seal/elf] AUDIT FAIL — no v8 symbols exported", file=sys.stderr)
         raise SystemExit(1)
