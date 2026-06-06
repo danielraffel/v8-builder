@@ -162,6 +162,17 @@ def main():
                     help="hard wall-clock cap on the launch (audio-etiquette)")
     args = ap.parse_args()
 
+    # CMake resolves -D path values relative to its BUILD dir, not the caller's CWD,
+    # so a relative --framework-dir/--include-dir/--skia-dir/--dawn-lib would point
+    # into <build>/<relpath> and silently miss V8.framework + headers. Resolve to
+    # absolute up front (relative to the invocation CWD) so the configure is location-
+    # independent regardless of where the gate is launched from.
+    args.framework_dir = str(Path(args.framework_dir).resolve())
+    args.include_dir = str(Path(args.include_dir).resolve())
+    args.skia_dir = str(Path(args.skia_dir).resolve())
+    if args.dawn_lib:
+        args.dawn_lib = str(Path(args.dawn_lib).resolve())
+
     work = HERE / "work"
     work.mkdir(exist_ok=True)
 

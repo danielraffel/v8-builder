@@ -59,8 +59,12 @@ bool run_identity(std::string* version_out, int* answer_out,
   volatile int partners = v8builder_force_collision_partners();
   *partners_out = partners;
 
-  v8::V8::InitializeICUDefaultLocation("v8_ios_identity");
-  v8::V8::InitializeExternalStartupData("v8_ios_identity");
+  // The sealed framework is built with v8_use_external_startup_data=false (the
+  // snapshot is EMBEDDED in the binary) and i18n OFF (no ICU). Do NOT call
+  // InitializeExternalStartupData / InitializeICUDefaultLocation: pointing V8 at a
+  // non-existent external snapshot blob makes Snapshot::Initialize fail the
+  // SerializedData magic-number check (a deserializer abort, NOT the Abseil ODR).
+  // With the embedded snapshot, Isolate::New finds the blob inside the image.
   std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
   v8::V8::InitializePlatform(platform.get());
   v8::V8::Initialize();   // aborts here on an UNSEALED build (Abseil ODR)
