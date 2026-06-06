@@ -576,18 +576,100 @@ class V8Build:
                 shutil.copy2(implib, dest / "v8.dll.lib")
             else:
                 raise SystemExit(f"expected import lib {implib} not produced")
+        produced = dest / libname
         # audit: assert 0 absl/icu/zlib internals exported. The seal is an export-table
         # property of the dylib itself, so we audit the dylib (the framework just rehouses
-        # this exact binary as V8.framework/V8 — same Mach-O, same export table).
-        backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
-        run([sys.executable, str(backend), "audit", "--lib", str(dest / libname),
-             "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
-        produced = dest / libname
+        # this exact binary as V8.framework/V8 — same Mach-O, same export table). Capture
+        # the export count as the pre-strip baseline for the strip-preserves-the-seal gate.
+        pre_strip_exports = self._seal_audit(produced, label="pre-strip")
+        # Strip LOCAL/debug symbols only (symbol_level=1 still emits a .symtab + minimal
+        # debug; the monolith link leaves a large local symbol table). The seal IS the
+        # DYNAMIC export table (.dynsym / Mach-O export trie / PE export table), which a
+        # locals-only strip never touches — re-audited below to PROVE the export count and
+        # the 0-ICU/zlib/Abseil-leak property are unchanged.
+        self._strip_lib(produced)
+        post_strip_exports = self._seal_audit(produced, label="post-strip")
+        if post_strip_exports != pre_strip_exports:
+            say(f"STRIP BROKE THE SEAL — export count changed {pre_strip_exports} -> "
+                f"{post_strip_exports}; you stripped the dynamic export table, not just "
+                f"locals. Aborting.", Colors.FAIL)
+            raise SystemExit(1)
+        say(f"strip preserved the export seal: {post_strip_exports} exports "
+            f"unchanged ({produced.name})", Colors.OK)
         if self.args.platform == "android":
             self._android_dt_needed_audit(produced)
         if self.args.platform == "ios":
             produced = self.wrap_ios_framework(dest, produced, arch)
         return produced
+
+    # Run the seal backend's `audit` over `lib` and return the integer export count it
+    # reports ("AUDIT OK — <N> exports ..."). A non-zero exit (any seal leak / no exports)
+    # propagates as a hard failure via run()'s check=True semantics, so reaching the parse
+    # already means the seal passed. The count is the strip-didn't-touch-.dynsym witness.
+    def _seal_audit(self, lib, label=""):
+        backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
+        cmd = [sys.executable, str(backend), "audit", "--lib", str(lib),
+               "--policy", str(SEAL_DIR / "policy.json")]
+        say("$ " + " ".join(map(str, cmd)) + (f"   [{label}]" if label else ""),
+            Colors.WARN)
+        proc = subprocess.run(cmd, env=self.env, capture_output=True, text=True)
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        if proc.returncode != 0:
+            raise SystemExit(f"seal audit failed for {lib} ({label})")
+        m = re.search(r"AUDIT OK — (\d+) exports", proc.stdout)
+        if not m:
+            raise SystemExit(f"could not parse export count from seal audit of {lib}")
+        return int(m.group(1))
+
+    # Strip LOCAL + debug symbols, preserving the DYNAMIC export table (= the seal).
+    #   Mach-O (mac/ios): `strip -x` removes non-global (local) symbols, keeps external/
+    #     exported. The codesignature (if any) is invalidated by the edit, so re-sign
+    #     ad-hoc (`codesign -f -s -`) — required before a sealed dylib/framework loads.
+    #   ELF (linux/android): `llvm-strip --strip-unneeded` drops .symtab + debug but KEEPS
+    #     .dynsym (the export table). Android uses the NDK llvm-strip from the DEPS NDK.
+    #   Windows (PE): the .dll carries no embedded debug (PDB is separate and unshipped),
+    #     so there is nothing to strip — no-op.
+    def _strip_lib(self, lib):
+        plat = self.args.platform
+        before = lib.stat().st_size
+        if plat in ("mac", "ios"):
+            run(["strip", "-x", str(lib)], env=self.env)
+            # Re-sign ad-hoc: `strip` rewrites the Mach-O and invalidates any existing
+            # (incl. linker-applied ad-hoc) signature; an unsigned/invalid sealed dylib
+            # won't load on recent macOS/iOS. `-f` forces, `-s -` is the ad-hoc identity.
+            cs = subprocess.run(["codesign", "-f", "-s", "-", str(lib)],
+                                env=self.env, capture_output=True, text=True)
+            if cs.returncode != 0:
+                say(f"codesign re-sign after strip failed: {cs.stderr.strip()}",
+                    Colors.FAIL)
+                raise SystemExit(1)
+        elif plat in ("linux", "android"):
+            stripper = self._llvm_strip()
+            run([stripper, "--strip-unneeded", str(lib)], env=self.env)
+        elif plat == "win":
+            say("win: PE dll carries no embedded debug (PDB is separate, unshipped) — "
+                "no strip needed", Colors.WARN)
+            return
+        after = lib.stat().st_size
+        say(f"stripped {lib.name}: {before/1e6:.1f} MB -> {after/1e6:.1f} MB "
+            f"({100*(before-after)/before:.0f}% smaller)", Colors.OK)
+
+    # Resolve a usable llvm-strip. For Android prefer the DEPS-fetched NDK's llvm-strip so
+    # the ELF tool exactly matches the toolchain that built the .so; fall back to PATH.
+    def _llvm_strip(self):
+        if self.args.platform == "android":
+            ndk = V8_DIR / "third_party" / "android_toolchain" / "ndk"
+            hits = sorted(ndk.glob(
+                "toolchains/llvm/prebuilt/*/bin/llvm-strip")) if ndk.exists() else []
+            if hits:
+                return str(hits[0])
+            say("NDK llvm-strip not found under third_party/android_toolchain; "
+                "falling back to PATH llvm-strip", Colors.WARN)
+        for cand in ("llvm-strip", "strip"):
+            if shutil.which(cand):
+                return cand
+        raise SystemExit("no llvm-strip/strip found on PATH for ELF strip")
 
     def wrap_ios_framework(self, dest, dylib, arch):
         # Wrap the sealed dylib into a flat (iOS) V8.framework bundle:
@@ -602,8 +684,10 @@ class V8Build:
             shutil.rmtree(fw)
         fw.mkdir(parents=True)
         shutil.copy2(dylib, fw / "V8")
-        # Headers
-        shutil.copytree(V8_DIR / "include", fw / "Headers")
+        # Headers (filtered: *.h/*.inc only — the framework's Headers/ is the consumer's
+        # public include root, so the same DEPS/OWNERS/*.md/*.json/*.pdl cruft filter as
+        # the loose include/ applies).
+        self._copy_headers(V8_DIR / "include", fw / "Headers")
         # Minimal Info.plist
         plist = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -621,10 +705,9 @@ class V8Build:
             + '</string></array>\n'
             '</dict></plist>\n')
         (fw / "Info.plist").write_text(plist, encoding="utf-8")
-        # Re-audit the framework binary (same export table; cheap belt-and-suspenders).
-        backend = SEAL_DIR / self.SEAL_BACKEND[self.args.platform]
-        run([sys.executable, str(backend), "audit", "--lib", str(fw / "V8"),
-             "--policy", str(SEAL_DIR / "policy.json")], env=self.env)
+        # Re-audit the framework binary (same already-stripped Mach-O re-housed as
+        # V8.framework/V8 — same export table; cheap belt-and-suspenders).
+        self._seal_audit(fw / "V8", label="framework")
         say(f"wrapped sealed dylib into {fw}")
         return fw
 
@@ -687,14 +770,34 @@ class V8Build:
             c["source"] = d.get("source", c["source"])
         return c
 
+    # Copy V8 public headers into `dst`, filtering out non-header repo metadata. Only
+    # *.h / *.inc are part of the consumable include surface; DEPS / OWNERS / DIR_METADATA
+    # / *.md / *.json / *.pdl are V8-repo bookkeeping that a downstream embedder never
+    # includes. (shutil, not rsync — rsync isn't on Windows runners.)
+    def _copy_headers(self, src, dst):
+        if dst.exists():
+            shutil.rmtree(dst)
+        kept = 0
+        for f in src.rglob("*"):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in (".h", ".inc"):
+                continue
+            rel = f.relative_to(src)
+            out = dst / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, out)
+            kept += 1
+        say(f"copied {kept} headers (*.h/*.inc only) into {dst}")
+
     def package(self, sealed, arch):
         dest = BUILD_DIR / self._cell_id(arch)
-        inc = dest / "include"
-        # V8 public headers (shutil, not rsync — rsync isn't on Windows runners)
-        if inc.exists():
-            shutil.rmtree(inc)
-        shutil.copytree(V8_DIR / "include", inc)
         is_ios = self.args.platform == "ios"
+        # Headers: every platform EXCEPT iOS ships a top-level include/. iOS embeds its
+        # headers inside V8.framework/Headers/ (done in wrap_ios_framework), so a duplicate
+        # top-level include/ would be dead weight — skip it.
+        if not is_ios:
+            self._copy_headers(V8_DIR / "include", dest / "include")
         manifest = {
             "v8_version": self._built_v8_version(),
             "platform": self.args.platform,
@@ -704,7 +807,10 @@ class V8Build:
             "i18n": bool(getattr(self.args, "ios_i18n", False)) if is_ios else True,
             "shared": True,
             "sealed": not self.args.no_seal,
-            "lib": str(Path(sealed).name),
+            # Relative path (from the artifact root) to the primary consumable binary.
+            # Android lays the .so out the idiomatic way (jniLibs/<abi>/libv8.so) and ships
+            # no lib/ duplicate; iOS ships the framework; the rest ship lib/<name>.
+            "lib": self._manifest_lib_path(sealed, arch),
             # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
             "pair": self._lkgr_contract(),
         }
@@ -727,10 +833,15 @@ class V8Build:
             manifest["abi"] = {"arm64": "arm64-v8a", "x64": "x86_64",
                                "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
             # Lay the .so out as an Android app expects it (jniLibs/<abi>/libv8.so) so a
-            # consumer can drop the artifact straight into src/main/jniLibs.
+            # consumer can drop the artifact straight into src/main/jniLibs. This is the
+            # ONLY copy of the .so we ship — drop the lib/ duplicate build_sealed staged
+            # (the .so was identical, so the released artifact carried it twice).
             jni = dest / "jniLibs" / manifest["abi"]
             jni.mkdir(parents=True, exist_ok=True)
             shutil.copy2(sealed, jni / Path(sealed).name)
+            lib_dir = dest / "lib"
+            if lib_dir.exists():
+                shutil.rmtree(lib_dir)
         elif is_ios:
             # iOS-specific build-shape fields (review addendum point 5/6): a consumer must
             # know it's a jitless, no-WASM, sealed framework before it links.
@@ -741,8 +852,26 @@ class V8Build:
                 "wasm": False,           # no JIT ⇒ no WebAssembly on iphoneos
                 "form": "framework",     # V8.framework (sealed dynamic), not static .a
             })
+            # The shipped form is V8.framework (binary + embedded Headers/). Drop the loose
+            # lib/ that build_sealed staged the dylib into before wrapping — the framework
+            # already embeds that exact sealed Mach-O as V8.framework/V8.
+            lib_dir = dest / "lib"
+            if lib_dir.exists():
+                shutil.rmtree(lib_dir)
         (dest / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         say(f"packaged {dest}")
+
+    # Relative path (from the artifact root) to the primary consumable binary, recorded in
+    # the manifest so a pairing consumer can locate the lib without guessing the layout.
+    def _manifest_lib_path(self, sealed, arch):
+        plat = self.args.platform
+        if plat == "android":
+            abi = {"arm64": "arm64-v8a", "x64": "x86_64",
+                   "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
+            return f"jniLibs/{abi}/{Path(sealed).name}"
+        if plat == "ios":
+            return "V8.framework/V8"
+        return f"lib/{Path(sealed).name}"
 
     # Windows identity validator, built AS A GN TARGET so it inherits V8's exact
     # toolchain (clang-cl + the bundled libc++ __Cr ABI) and links the sealed v8.dll

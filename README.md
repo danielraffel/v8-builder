@@ -79,17 +79,37 @@ see below.
 
 Every cell runs the same pipeline — `build-v8.py <platform> -archs <arch>` → sync V8 →
 `gn`/`ninja` the static `v8_monolith` → `seal/<platform>.py` wraps it into a sealed shared
-library → audit (0 ICU/zlib/Abseil exports) → package. Each release artifact is a
-`v8-<platform>-<arch>-<ver>.zip` containing:
+library → audit (0 ICU/zlib/Abseil exports) → **strip locals/debug (re-audited to prove the
+export seal is unchanged)** → package. Each release artifact is a lean, per-platform-correct
+`v8-<platform>-<arch>-<ver>.zip` — only the headers, the one stripped binary, and the
+manifest; no build-only validator harness, no duplicate copies:
 
 ```
-include/                # the v8::/cppgc:: public headers (the embedder API)
-lib/libv8.{dylib,so}    # macOS/Linux: the sealed shared library
-    v8.dll + v8.dll.lib # Windows: sealed DLL + import lib
-    V8.framework/       # iOS: the sealed framework (binary + headers + Info.plist)
-manifest.json           # exact V8 revision, arch, ABI flags, and the Skia release it
-                        #   was validated against (the co-validated pair)
+mac / linux:
+  include/                # the v8::/cppgc:: public headers, *.h/*.inc only (no DEPS/OWNERS/*.md/*.json/*.pdl)
+  lib/libv8.{dylib,so}    # the sealed shared library, STRIPPED (locals/debug gone, .dynsym/export trie kept)
+  manifest.json
+windows:
+  include/
+  lib/v8.dll + lib/v8.dll.lib   # sealed DLL + import lib (PE carries no embedded debug → no strip)
+  manifest.json
+android:
+  include/
+  jniLibs/<abi>/libv8.so  # idiomatic Android layout (the ONLY .so copy; STRIPPED via the NDK llvm-strip)
+  manifest.json
+ios:
+  V8.framework/           # the sealed framework (STRIPPED binary + embedded Headers/ + Info.plist)
+  manifest.json
 ```
+
+The strip keeps the dynamic export table (the seal) byte-for-byte: the packager re-runs
+`seal/<platform>.py audit` after stripping and **aborts the build if the export count
+changes**, so a leaner artifact can never be a less-sealed one. The build-only `validate/`
+harness (the android / win-arm64 cross-built identity validators) rides along in the
+*uploaded CI artifact* for the post-build emulator/VM step, but is excluded from the
+released zip — a consumer never needs it. `manifest.json` records the exact V8 revision,
+arch, ABI flags, the relative path to the shipped binary (`lib`), and the Skia release the
+artifact was validated against (the co-validated pair).
 
 A multi-platform release is **single-SHA gated**: every artifact must name the same V8
 revision, or the release is rejected — so a downloaded set is never mixed-revision.

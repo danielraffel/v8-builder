@@ -233,7 +233,14 @@ jobs:
           for d in artifacts/v8-*; do
             [ -d "$d" ] || continue
             name="$(basename "$d")"                 # v8-<platform>-<arch>
-            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${ver}.zip" . )
+            # validate/ is the android + win-arm64 offline harness (cross-built validator
+            # + a co-located lib copy). It rides along in the UPLOADED artifact so the
+            # separate emulator/VM validation step can run it AFTER the build — but a
+            # release consumer never needs it, and it duplicates the shipped lib. Exclude
+            # it (and any stray macOS metadata) from the release zip so each artifact
+            # contains ONLY the lean, required entries.
+            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${ver}.zip" . \
+                -x 'validate/*' -x '*/.DS_Store' -x '__MACOSX/*' )
           done
           python3 - "$ver" > release/RELEASE_NOTES.md <<'PY'
           import json, glob, sys
