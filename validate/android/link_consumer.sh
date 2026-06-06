@@ -35,7 +35,10 @@ LIBCXXABI="$ROOT/third_party/libc++abi/src/include"
 CXXA="$OUT/obj/buildtools/third_party/libc++/libc++.a"
 CXXABIA="$OUT/obj/buildtools/third_party/libc++abi/libc++abi.a"
 UWOBJS="$OUT/obj/buildtools/third_party/libunwind/libunwind"
-LIB="$PKG/lib/libv8.so"
+# Lean packaging ships the .so at the Gradle-idiomatic jniLibs/<abi>/ and drops the lib/
+# duplicate; validate the SHIPPED binary. Fall back to lib/ for older/non-lean layouts.
+LIB="$PKG/jniLibs/arm64-v8a/libv8.so"
+[ -f "$LIB" ] || LIB="$PKG/lib/libv8.so"
 INC="$PKG/include"
 VER="$(python3 -c "import json;print(json.load(open('$PKG/manifest.json'))['v8_version'])")"
 
