@@ -152,16 +152,19 @@ def test_export_count_parse():
 
 
 def test_strip_seal_gate_decision():
-    """The gate: equal pre/post counts pass; any change is a hard fail.
-
-    Mirrors the abort condition in build_sealed without invoking a real strip.
+    """The COUNT gate: strip can only REMOVE symbols, so an INCREASE is corruption (fail);
+    a decrease or no-change passes the count gate. The seal property itself — 0 ICU/zlib/
+    Abseil leaks AND v8 exports present — is enforced separately by _seal_audit's exit code
+    (the backend hard-fails), NOT by this count comparison. Mirrors build_sealed's abort.
     """
-    def gate(pre, post):
-        return pre == post  # True == "seal preserved"; False would raise SystemExit
+    def count_gate_ok(pre, post):
+        return post <= pre  # only an INCREASE aborts; strip never adds exports
 
-    assert gate(68012, 68012) is True
-    assert gate(68012, 68011) is False   # stripped one export too many → fail
-    assert gate(68012, 0) is False       # nuked the export table entirely → fail
+    assert count_gate_ok(68012, 68012) is True    # unchanged (mac strip -x)
+    assert count_gate_ok(132596, 66298) is True   # strip pruned dead v8::internal:: dynamic
+                                                  #   exports to the real public surface (the
+                                                  #   actual ELF case: linux ≈ mac's ~66k)
+    assert count_gate_ok(68012, 68013) is False   # rose → strip can't add symbols → corruption
 
 
 # --- standalone fallback harness ------------------------------------------------
