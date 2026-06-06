@@ -669,21 +669,31 @@ class V8Build:
         say(f"stripped {lib.name}: {before/1e6:.1f} MB -> {after/1e6:.1f} MB "
             f"({100*(before-after)/before:.0f}% smaller)", Colors.OK)
 
-    # Resolve a usable llvm-strip. For Android prefer the DEPS-fetched NDK's llvm-strip so
-    # the ELF tool exactly matches the toolchain that built the .so; fall back to PATH.
+    # Resolve a stripper that can handle the target ELF. The host GNU `strip` on the x86_64
+    # CI runner CANNOT strip the cross-compiled android arm64 .so ("Unable to recognise the
+    # format of the input file"), so prefer an llvm strip that handles every arch:
+    #   1. the V8-BUNDLED llvm-strip (third_party/llvm-build/...) — always present in the
+    #      checkout and is the exact toolchain that built the lib, so it reads any target;
+    #   2. the DEPS NDK's llvm-strip (android);
+    #   3. PATH llvm-strip;
+    #   4. host GNU `strip` — native linux ONLY (it can't do the cross android .so).
     def _llvm_strip(self):
+        bundled = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-strip"
+        if bundled.exists():
+            return str(bundled)
         if self.args.platform == "android":
             ndk = V8_DIR / "third_party" / "android_toolchain" / "ndk"
             hits = sorted(ndk.glob(
                 "toolchains/llvm/prebuilt/*/bin/llvm-strip")) if ndk.exists() else []
             if hits:
                 return str(hits[0])
-            say("NDK llvm-strip not found under third_party/android_toolchain; "
-                "falling back to PATH llvm-strip", Colors.WARN)
-        for cand in ("llvm-strip", "strip"):
+            say("bundled + NDK llvm-strip not found; falling back to PATH llvm-strip "
+                "(host GNU strip cannot strip the android arm64 .so)", Colors.WARN)
+        cands = ("llvm-strip",) if self.args.platform == "android" else ("llvm-strip", "strip")
+        for cand in cands:
             if shutil.which(cand):
                 return cand
-        raise SystemExit("no llvm-strip/strip found on PATH for ELF strip")
+        raise SystemExit("no arch-capable llvm-strip found for the ELF strip")
 
     def wrap_ios_framework(self, dest, dylib, arch):
         # Wrap the sealed dylib into a flat (iOS) V8.framework bundle:
