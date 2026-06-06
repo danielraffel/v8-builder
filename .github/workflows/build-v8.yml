@@ -249,7 +249,7 @@ jobs:
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \
-              --title "V8 ${ver} (sealed, Skia/Dawn-coexisting)" \
+              --title "V8 ${ver}" \
               --notes-file release/RELEASE_NOTES.md \
               release/*.zip
           fi
