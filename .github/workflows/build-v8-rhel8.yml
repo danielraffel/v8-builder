@@ -68,15 +68,17 @@ jobs:
           ln -sf /usr/bin/python3.11 /usr/local/bin/python3
           ln -sf /usr/bin/python3.11 /usr/local/bin/python
           python3 --version
-          # V8's BUNDLED toolchain binaries (third_party/rust-toolchain/bin/bindgen, the
-          # bundled clang) are linked against a newer libstdc++ than Rocky 8's system one
-          # (they need GLIBCXX_3.4.26+). gcc-toolset-12 ships that libstdc++; register it
-          # system-wide via ldconfig so the bundled tools resolve it at runtime. (NOTE: this
-          # means libv8.so's GLIBCXX floor is gcc-toolset's — the GLIBC floor stays 2.28,
-          # which is what this lane measures; a consumer on a bare-old distro would also need
-          # this libstdc++ at runtime.)
-          echo /opt/rh/gcc-toolset-12/root/usr/lib64 > /etc/ld.so.conf.d/gcc-toolset-12.conf
-          ldconfig
+          # V8's BUNDLED toolchain binaries (third_party/rust-toolchain/bin/bindgen, clang)
+          # need GLIBCXX_3.4.26+, which Rocky 8's SYSTEM libstdc++ lacks. V8's build scrubs
+          # LD_LIBRARY_PATH for its toolchain actions, so an ldconfig path or env var doesn't
+          # reach bindgen — gcc-toolset's newer libstdc++ must BE the system /lib64 one.
+          # Point /lib64/libstdc++.so.6 at gcc-toolset-12's newest libstdc++. (NOTE: this
+          # raises libv8.so's GLIBCXX floor to gcc-toolset's; the GLIBC floor — what this
+          # lane measures — stays 2.28; a bare-old-distro consumer would also need this
+          # libstdc++ at runtime, which is inherent to building C++20 V8 on an old base.)
+          NEWEST="$(ls /opt/rh/gcc-toolset-12/root/usr/lib64/libstdc++.so.6.0.* | sort -V | tail -1)"
+          cp -f "$NEWEST" /lib64/ && ln -sf "/lib64/$(basename "$NEWEST")" /lib64/libstdc++.so.6 && ldconfig
+          echo "system libstdc++ now: $(basename "$NEWEST")"; strings /lib64/libstdc++.so.6 | grep -E '^GLIBCXX_3\.4\.(2[6-9]|3)' | tail -1
       - name: Report build-host glibc (proves the 2.28 base)
         run: |
           ldd --version | head -1
