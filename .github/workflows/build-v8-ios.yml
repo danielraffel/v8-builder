@@ -51,6 +51,9 @@ jobs:
           # x86_64 simulator: only for Intel-host Sims; low priority on an all-arm fleet.
           # - { env: simulator, arch: x64, gate: true }
     runs-on: macos-15
+    # The DEVICE cell (gate:false) is a deferred slice (needs provisioning/signing; its
+    # gn gen can fail without an SDK/profile) — don't let it mask the SIMULATOR gate verdict.
+    continue-on-error: ${{ !matrix.gate }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -90,9 +93,11 @@ jobs:
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -path "*simulator-${{ matrix.arch }}*" -name libskunicode_icu.a | head -1)")" && pwd)"
           DAWN="$SKIA_LIBDIR/libdawn_combined.a"
           EXPECTED="$(python3 -c "import json;print(json.load(open('build/'+'$CELL'+'/manifest.json'))['v8_version'])")"
+          # Lean packaging ships iOS as V8.framework only (no top-level lib/ or include/);
+          # the framework sits at build/<cell>/V8.framework and embeds its own Headers/.
           python3 validate/ios/run_ios_gate.py \
-            --framework-dir "$PWD/build/$CELL/lib" \
-            --include-dir   "$PWD/build/$CELL/include" \
+            --framework-dir "$PWD/build/$CELL" \
+            --include-dir   "$PWD/build/$CELL/V8.framework/Headers" \
             --skia-dir      "$SKIA_LIBDIR" \
             --dawn-lib      "$DAWN" \
             --expected-version "$EXPECTED"
