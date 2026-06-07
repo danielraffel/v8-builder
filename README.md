@@ -190,17 +190,21 @@ Link against the library and its headers. The **ABI contract** a consumer must m
   slice *requires* your signing; the **simulator** slice (shipped here) does not. The Windows
   `v8.dll` is unsigned — Authenticode-sign it with your own cert if your distribution needs
   it. Linux/Android `.so`s aren't signed (the Android consumer's APK signature covers it).
-- **iOS is jitless — set the runtime flags (App Store requirement):** the `V8.framework` is
-  *built* jitless (`v8_enable_lite_mode=true` ⇒ no TurboFan/Maglev/Sparkplug/WASM), but
-  [V8's iOS docs](https://v8.dev/docs/cross-compile-ios) require the embedder to **also pass
-  `--jitless --expose_gc` before `V8::Initialize`** so V8 allocates **no runtime executable
-  (RWX) memory** — mandatory on iOS since Dec 2020. Call it before creating any isolate/
-  context (e.g. before choc's `createV8Context()`):
+- **iOS is jitless — App Store compliant *by build*:** the `V8.framework` is built
+  `v8_enable_lite_mode=true` (⇒ `v8_jitless`, no TurboFan/Maglev/Sparkplug/WASM). In V8,
+  *jitless* means "disable runtime allocation of executable memory" — so the **build config is
+  the App Store compliance boundary** (no runtime RWX/JIT; embedded builtins live in signed
+  `__TEXT`, which is fine). As a **defensive guardrail** ([V8's iOS docs](https://v8.dev/docs/cross-compile-ios)),
+  also assert it at runtime before `V8::Initialize` / choc's `createV8Context()`:
   ```cpp
-  v8::V8::SetFlagsFromString("--jitless --expose_gc");  // iOS: before InitializePlatform/Initialize
+  v8::V8::SetFlagsFromString("--jitless");   // guardrail/regression-tripwire, before init
   ```
-  The interpreter (Ignition) runs the full language; only the JIT tiers + WASM are absent.
-  The release ships the **simulator-arm64** slice; the device slice is built + signed per-app.
+  This is **redundant on a correctly-built lite binary, not load-bearing** — it just trips
+  early if someone ever links a non-jitless slice. (`--expose_gc` is **test-only**: it exposes
+  a JS `gc()` hook our validation gate uses to prove the flag took effect; omit it in
+  production.) The interpreter (Ignition) runs the full language; only the JIT tiers + WASM are
+  absent. Don't request any JIT / `MAP_JIT` entitlements. The release ships the
+  **simulator-arm64** slice; the device slice is built + signed per-app.
 
 Beyond that it's ordinary V8: create a platform, an isolate, a context, and run.
 
