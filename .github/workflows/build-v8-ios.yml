@@ -50,7 +50,12 @@ jobs:
           - { env: device,    arch: arm64, gate: false }
           # x86_64 simulator: only for Intel-host Sims; low priority on an all-arm fleet.
           # - { env: simulator, arch: x64, gate: true }
-    runs-on: macos-15
+    # Use the self-hosted Mac pool (Studio / M5, `v8-build` label) when configured via
+    # V8_MACOS_RUNS_ON_JSON — faster (warm ccache) and a clean, non-thrashing Simulator vs a
+    # fresh GitHub macos runner (whose first-boot sim migration starves the 90s gate). Forks
+    # with no var fall back to GitHub `macos-15`. GitHub auto-load-balances across all runners
+    # carrying the label, so a busy Studio falls over to an idle M5.
+    runs-on: ${{ fromJSON(vars.V8_MACOS_RUNS_ON_JSON || '"macos-15"') }}
     # The DEVICE cell (gate:false) is a deferred slice (needs provisioning/signing; its
     # gn gen can fail without an SDK/profile) — don't let it mask the SIMULATOR gate verdict.
     continue-on-error: ${{ !matrix.gate }}
