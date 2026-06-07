@@ -16,11 +16,11 @@
 // unsealed build. If V8::Initialize() survives and eval 20+22 == 42 with the
 // version matching, the sealed framework prevents the ODR ⇒ iOS lane is viable.
 //
-// Build shape: jitless (no JIT, no WASM — v8_enable_lite_mode=true in ios_gn_args). This
-// gate runs the EXACT App-Store-ready runtime config: it sets `--jitless --expose_gc`
-// (v8.dev/docs/cross-compile-ios) before init, then MEASURES the jitless posture from two
-// signals — `typeof WebAssembly === 'undefined'` (build is lite-mode) AND `typeof gc ===
-// 'function'` (proves the runtime flags were applied) — rather than asserting it blindly.
+// Build shape: jitless (no JIT, no WASM — v8_enable_lite_mode=true in ios_gn_args; that build
+// config is the App Store compliance boundary). This gate sets the `--jitless` runtime
+// guardrail (v8.dev/docs/cross-compile-ios) before init and MEASURES the jitless posture from
+// `typeof WebAssembly === 'undefined'` (the JIT tiers + WASM are compiled out) rather than
+// asserting it blindly.
 
 #import <Foundation/Foundation.h>
 #include <cstdio>
@@ -57,15 +57,15 @@ void write_result(bool pass, const char* detail) {
 
 // Run the V8 identity contract. Returns true on full pass.
 bool run_identity(std::string* version_out, int* answer_out,
-                  int* partners_out, bool* wasm_absent_out, bool* gc_exposed_out) {
-  // APP STORE / JITLESS RUNTIME CONTRACT (https://v8.dev/docs/cross-compile-ios): the iOS
-  // framework is BUILT jitless (ios_gn_args: v8_enable_lite_mode=true ⇒ v8_jitless ⇒
-  // TurboFan/Maglev/Sparkplug/WASM off), but the V8 docs ALSO require the embedder to pass
-  // these RUNTIME flags before V8 init so V8 allocates no executable (RWX) memory — the hard
-  // iOS App Store requirement since Dec 2020. We set them HERE so the gate exercises the EXACT
-  // configuration a shipping app must use (not just the build shape), and PROVE they were
-  // applied via gc() below (--expose_gc surfaces gc()). Must precede InitializePlatform.
-  v8::V8::SetFlagsFromString("--jitless --expose_gc");
+                  int* partners_out, bool* wasm_absent_out) {
+  // APP STORE / JITLESS GUARDRAIL (https://v8.dev/docs/cross-compile-ios): the iOS framework
+  // is BUILT jitless (ios_gn_args: v8_enable_lite_mode=true ⇒ v8_jitless ⇒ no
+  // TurboFan/Maglev/Sparkplug/WASM, and "jitless" = no runtime executable/RWX memory) — that
+  // BUILD CONFIG is the App Store compliance boundary. We also set --jitless at runtime as a
+  // defensive guardrail/regression-tripwire (redundant on a correct lite build, not
+  // load-bearing — per V8-source review). (--expose_gc is test-only and unnecessary; omitted
+  // to keep the gate on the exact production posture.) Must precede InitializePlatform.
+  v8::V8::SetFlagsFromString("--jitless");
 
   // Pull Dawn/Skia symbols in first so their Abseil/ICU/zlib are resident before V8.
   volatile int partners = v8builder_force_collision_partners();
@@ -112,16 +112,6 @@ bool run_identity(std::string* version_out, int* answer_out,
             v8::Script::Compile(ctx, src).ToLocalChecked();
         wasm_absent = script->Run(ctx).ToLocalChecked()->BooleanValue(isolate);
       }
-      // 3) prove --expose_gc TOOK EFFECT — gc() exists ONLY when --expose_gc is set, so this
-      //    confirms SetFlagsFromString was honored (not silently dropped) ⇒ the paired
-      //    --jitless flag was applied too (the App-Store-ready runtime posture).
-      {
-        v8::Local<v8::String> src = v8::String::NewFromUtf8Literal(
-            isolate, "typeof gc === 'function'");
-        v8::Local<v8::Script> script =
-            v8::Script::Compile(ctx, src).ToLocalChecked();
-        *gc_exposed_out = script->Run(ctx).ToLocalChecked()->BooleanValue(isolate);
-      }
     }
     isolate->Dispose();
     delete params.array_buffer_allocator;
@@ -137,32 +127,30 @@ bool run_identity(std::string* version_out, int* answer_out,
 int main(int argc, char* argv[]) {
   std::string version;
   int answer = -1, partners = 0;
-  bool wasm_absent = false, gc_exposed = false;
-  bool ok = run_identity(&version, &answer, &partners, &wasm_absent, &gc_exposed);
+  bool wasm_absent = false;
+  bool ok = run_identity(&version, &answer, &partners, &wasm_absent);
 
-  // jitless is MEASURED, not hardcoded: the build is lite-mode (WASM compiled out ⇒
-  // wasm_absent) AND we ran under the --jitless --expose_gc runtime flags (gc_exposed proves
-  // they were applied). Both ⇒ the App-Store-ready jitless posture is live, not assumed.
-  bool jitless = wasm_absent && gc_exposed;
+  // jitless is MEASURED, not hardcoded: the build is lite-mode (the JIT tiers + WASM are
+  // compiled out ⇒ no `WebAssembly` global ⇒ wasm_absent), and we additionally ran under the
+  // --jitless runtime guardrail. wasm_absent is the build-shape witness for the no-JIT posture.
+  bool jitless = wasm_absent;
   std::printf("PULP_ENGINE_IDENTITY_BEGIN\n"
               "engine_type=v8\n"
               "runtime_version=%s\n"
               "js_eval_20_plus_22=%d\n"
               "wasm_absent=%d\n"
               "collision_partners=%d\n"
-              "v8_flags=--jitless --expose_gc\n"
-              "expose_gc_active=%d\n"
+              "v8_flags=--jitless\n"
               "jitless=%d\n"
               "PULP_ENGINE_IDENTITY_END\n",
-              version.c_str(), answer, wasm_absent ? 1 : 0, partners,
-              gc_exposed ? 1 : 0, jitless ? 1 : 0);
+              version.c_str(), answer, wasm_absent ? 1 : 0, partners, jitless ? 1 : 0);
   std::fflush(stdout);
 
-  bool full_pass = ok && wasm_absent && gc_exposed;
+  bool full_pass = ok && wasm_absent;
   char detail[320];
   std::snprintf(detail, sizeof(detail),
-                "v8=%s eval=%d wasm_absent=%d gc_exposed=%d partners=%d expected=%s",
-                version.c_str(), answer, wasm_absent ? 1 : 0, gc_exposed ? 1 : 0,
+                "v8=%s eval=%d wasm_absent=%d partners=%d expected=%s",
+                version.c_str(), answer, wasm_absent ? 1 : 0,
                 partners, EXPECTED_V8_VERSION);
   write_result(full_pass, detail);
 
