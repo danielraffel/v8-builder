@@ -188,11 +188,14 @@ Link against the library and its headers. The **ABI contract** a consumer must m
   wrapper, which Pulp's `js_v8_engine.cpp` uses — must supply its own `__Cr`-ABI libc++,
   and the official Windows LLVM package ships none. The release therefore bundles
   `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): a static, `__Cr`-ABI
-  libc++ **archived from V8's own bundled libc++ objects**, so its ABI matches
+  libc++ **archived directly from the libc++/libc++abi object files V8 already compiled
+  for `v8.dll`** (globbed from `out/<cell>/obj/buildtools/third_party/libc++` and
+  `…/libc++abi`, then collected with V8's bundled `llvm-lib`), so its ABI matches
   `v8.dll.lib`'s `…@__Cr@std@@` exports by construction (same clang-cl, same
-  `_LIBCPP_ABI_NAMESPACE=__Cr`). Link it alongside `msvcprt.lib`; the archive is built
-  with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` so it doesn't trip an `lld-link`
-  `/FAILIFMISMATCH`. Compile your consumer with **clang-cl + that same libc++** (the
+  `_LIBCPP_ABI_NAMESPACE=__Cr`). Archiving the already-built objects avoids a GN target
+  that would be rejected by `libc++`'s visibility list. Link it alongside `msvcprt.lib`;
+  the objects were compiled with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` so they don't trip an
+  `lld-link` `/FAILIFMISMATCH`. Compile your consumer with **clang-cl + that same libc++** (the
   decided Windows ABI contract). A pure `v8::`-API consumer that never instantiates an
   out-of-line std type may not need it; reach for it the moment you pull in `<iostream>`
   or the choc wrapper.

@@ -415,39 +415,35 @@ if ((is_mac || is_ios || is_linux || is_win || is_android) && v8_monolithic) {
 # package ships no __Cr-ABI libc++, so the consumer would have to hand-build one.
 #
 # V8 ALREADY compiles its bundled libc++ from //buildtools/third_party/libc++
-# with the exact __Cr ABI (`_LIBCPP_ABI_NAMESPACE=__Cr`), the exact clang-cl
-# toolchain, and the exact flags v8.dll was built with — including the
-# _LIBCPP_HAS_NO_... posture and the vcruntime C++ ABI. So instead of running a
-# SECOND, drift-prone CMake build of llvm-project's `runtimes` by hand (the
-# Pulp #27 recipe: LIBCXX_ABI_NAMESPACE=__Cr, LIBCXX_CXX_ABI=vcruntime, RTTI +
-# exceptions ON, static), we archive V8's OWN already-built libc++ objects into a
-# `libc++.lib`. This is byte-for-byte the same ABI as v8.dll.lib's
-# `...@__Cr@std@@` exports BY CONSTRUCTION — same compiler invocation, no
-# second-toolchain skew to maintain.
+# (and libc++abi) with the exact __Cr ABI (`_LIBCPP_ABI_NAMESPACE=__Cr`), the
+# exact clang-cl toolchain, and the exact flags v8.dll was built with —
+# including the _LIBCPP_HAS_NO_... posture and the vcruntime C++ ABI. Those
+# object files already exist in the gn out dir after the normal v8_monolith
+# build (the same objects folded into v8.dll). So instead of running a SECOND,
+# drift-prone CMake build of llvm-project's `runtimes` by hand (the Pulp #27
+# recipe: LIBCXX_ABI_NAMESPACE=__Cr, LIBCXX_CXX_ABI=vcruntime, RTTI + exceptions
+# ON, static), we archive V8's OWN already-built `.obj` files directly into a
+# `libc++.lib` with V8's bundled `llvm-lib`. This is byte-for-byte the same ABI
+# as v8.dll.lib's `...@__Cr@std@@` exports BY CONSTRUCTION — same compiler
+# invocation, no second-toolchain skew to maintain.
 #
-# `complete_static_lib = true` makes gn emit a TRUE archive (all member .obj
-# files), not a thin/import lib — so the consumer links it directly. The dep is
-# the same `//buildtools/third_party/libc++` target the v8_monolith linked, so
-# the objects are identical to the ones folded into v8.dll. It links against
-# `msvcprt.lib` and needs `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` to dodge an
-# lld-link /FAILIFMISMATCH on the STDIO-wide-specifier marker — V8's own libc++
-# config already sets that, so archiving its objects inherits the right marker.
-WIN_LIBCXX_TARGET_GN = '''\
-# >>> v8-builder win __Cr libc++ static lib (injected)
-if (is_win && v8_monolithic && !is_component_build) {
-  static_library("v8builder_win_libcxx") {
-    output_name = "libc++"
-    # TRUE archive of all member objects (not a thin/import lib) so a consumer
-    # links the libc++ runtime directly. Whole-archive at consume time is the
-    # consumer's call; the archive carries every object either way.
-    complete_static_lib = true
-    sources = []
-    # The SAME bundled libc++ target the v8_monolith linked — its objects carry
-    # the __Cr ABI namespace and were built with v8.dll's exact clang-cl flags.
-    deps = [ "//buildtools/third_party/libc++" ]
-  }
-}
-'''
+# An earlier approach injected a top-level GN static_library that deps
+# `//buildtools/third_party/libc++`, but GN visibility rejects it: libc++ only
+# permits deps from a restricted list, not an injected top-level target
+# (BUILDCONFIG.gn:571 "Dependency not allowed"). Archiving the already-compiled
+# objects sidesteps GN entirely — no new target, no visibility constraint.
+#
+# The objects link against `msvcprt.lib` and were compiled with
+# `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` (V8's own libc++ config sets it), so a
+# consumer that links the same marker dodges any lld-link /FAILIFMISMATCH.
+
+# gn out-dir subtrees holding the already-compiled __Cr libc++/libc++abi objects.
+# libc++abi carries the ABI runtime (typeinfo, __cxa_*, vtable thunks) an
+# iostreams consumer also pulls in, so we archive both.
+WIN_LIBCXX_OBJ_SUBDIRS = (
+    "obj/buildtools/third_party/libc++",
+    "obj/buildtools/third_party/libc++abi",
+)
 
 
 class Colors:
@@ -575,14 +571,8 @@ class V8Build:
             run([sys.executable, str(SEAL_DIR / "elf.py"), "version-script",
                  "--out", str(V8_DIR / "v8_embedder_exports.map")], env=self.env)
         gn_blocks = "\n" + SEAL_TARGET_GN + "\n"
-        if self.args.platform == "win":
-            # Ship a __Cr-ABI libc++.lib alongside v8.dll so a Windows consumer using
-            # iostreams (choc's V8 wrapper) doesn't have to hand-build one (task #17).
-            gn_blocks += "\n" + WIN_LIBCXX_TARGET_GN + "\n"
         build_gn.write_text(text + gn_blocks, encoding="utf-8")
         say("injected v8_sealed_shared gn target")
-        if self.args.platform == "win":
-            say("injected v8builder_win_libcxx (__Cr libc++.lib) gn target")
 
     def _cell_id(self, arch):
         # iOS has TWO axes (env + arch) so its output/dist dir is ios-<env>-<arch>
@@ -667,33 +657,83 @@ class V8Build:
     # The sealed v8.dll exports ZERO out-of-line libc++ runtime, so a Windows consumer
     # using iostreams (choc's V8 wrapper) must supply its own __Cr-ABI libc++ — which
     # the official LLVM Windows package does not ship. We archive V8's OWN bundled
-    # libc++ objects (same clang-cl, same _LIBCPP_ABI_NAMESPACE=__Cr, same flags v8.dll
-    # used) into lib/libc++.lib, so the ABI matches v8.dll.lib's `...@__Cr@std@@`
-    # exports BY CONSTRUCTION. Staged next to v8.dll + v8.dll.lib.
+    # libc++/libc++abi OBJECT FILES (same clang-cl, same _LIBCPP_ABI_NAMESPACE=__Cr,
+    # same flags v8.dll used) into lib/libc++.lib, so the ABI matches v8.dll.lib's
+    # `...@__Cr@std@@` exports BY CONSTRUCTION. Staged next to v8.dll + v8.dll.lib.
+    #
+    # No GN target is injected: a top-level static_library that deps
+    # //buildtools/third_party/libc++ is rejected by GN visibility (libc++'s
+    # visibility list excludes injected targets). The v8_monolith build already
+    # compiled these objects into the out dir, so we glob and archive THOSE directly.
     def build_win_libcxx(self, out, arch):
         if self.args.platform != "win":
             return None
-        run(["ninja", "-C", str(out), "v8builder_win_libcxx"], cwd=V8_DIR, env=self.env)
-        # gn emits a static_library output_name="libc++" as libc++.lib in $root_out_dir
-        # (clang-cl/MSVC archives are <output_name>.lib). Some toolchains emit obj/<...>;
-        # check the common locations.
-        candidates = [out / "libc++.lib", out / "obj" / "libc++.lib"]
-        produced = next((c for c in candidates if c.exists()), None)
-        if produced is None:
-            # last resort: find any libc++.lib gn dropped under out/
-            found = list(out.rglob("libc++.lib"))
-            produced = found[0] if found else None
-        if produced is None:
+        objs = self._find_win_libcxx_objs(out)
+        if not objs:
             raise SystemExit(
-                "expected __Cr libc++.lib not produced by v8builder_win_libcxx "
-                f"(looked in {out} and out/obj)")
+                "expected compiled __Cr libc++/libc++abi .obj files under "
+                f"{out}/obj/buildtools/third_party/ (libc++, libc++abi) — found none. "
+                "The v8_monolith build should have compiled them.")
+        say(f"found {len(objs)} __Cr libc++/libc++abi object(s) under {out}/obj")
         dest = BUILD_DIR / self._cell_id(arch) / "lib"
         dest.mkdir(parents=True, exist_ok=True)
         staged = dest / "libc++.lib"
-        shutil.copy2(produced, staged)
+        self._archive_objs(objs, staged)
         self._verify_cr_libcxx(staged, arch)
-        say(f"staged __Cr libc++.lib -> {staged}")
+        say(f"staged __Cr libc++.lib ({len(objs)} objs) -> {staged}")
         return staged
+
+    # Glob the already-compiled libc++ + libc++abi .obj files V8 produced for the
+    # v8_monolith build. Primary path is out/obj/buildtools/third_party/{libc++,
+    # libc++abi}/**/*.obj; if a checkout lays the objects out differently, fall back
+    # to an rglob under out/obj/buildtools/third_party/ for those two dirs.
+    def _find_win_libcxx_objs(self, out):
+        objs = []
+        for sub in WIN_LIBCXX_OBJ_SUBDIRS:
+            base = out / sub
+            if base.is_dir():
+                objs.extend(sorted(base.rglob("*.obj")))
+        if objs:
+            return objs
+        # Fallback: the third_party tree may nest the libc++/libc++abi dirs deeper.
+        tp = out / "obj" / "buildtools" / "third_party"
+        if tp.is_dir():
+            for d in sorted(tp.rglob("*")):
+                if d.is_dir() and d.name in ("libc++", "libc++abi"):
+                    objs.extend(sorted(d.rglob("*.obj")))
+        return objs
+
+    # Archive the object files into a TRUE static lib with V8's bundled llvm-lib
+    # (so the archive carries the SAME __Cr objects v8.dll was built from). Prefer
+    # the V8-bundled llvm-lib.exe; fall back to a PATH-resolved llvm-lib / lib.exe.
+    def _archive_objs(self, objs, staged):
+        if staged.exists():
+            staged.unlink()
+        archiver = self._win_archiver()
+        # llvm-lib / lib.exe share the MSVC librarian CLI: /OUT:<lib> <objs...>.
+        cmd = [archiver, f"/OUT:{staged}"] + [str(o) for o in objs]
+        run(cmd, cwd=V8_DIR, env=self.env)
+        if not staged.exists():
+            raise SystemExit(f"archiver {archiver} did not produce {staged}")
+
+    # Locate the MSVC-style librarian. V8 bundles llvm-lib at
+    # third_party/llvm-build/Release+Asserts/bin/llvm-lib.exe (same toolchain that
+    # compiled the objects). Fall back to a PATH llvm-lib or MSVC lib.exe.
+    def _win_archiver(self):
+        bundled = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-lib.exe"
+        if bundled.exists():
+            return str(bundled)
+        alt = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-lib"
+        if alt.exists():
+            return str(alt)
+        for name in ("llvm-lib", "lib.exe", "lib"):
+            found = shutil.which(name)
+            if found:
+                say(f"using PATH archiver {found} (no bundled llvm-lib)", Colors.WARN)
+                return found
+        raise SystemExit(
+            "no archiver found: bundled llvm-lib.exe absent and no llvm-lib/lib.exe "
+            "on PATH — cannot build libc++.lib")
 
     # Hard-gate: the archive MUST carry the __Cr ABI namespace (mangled `@__Cr@std@@`),
     # matching v8.dll.lib's exports. A plain MSVC-STL or stock-LLVM libc++ would carry

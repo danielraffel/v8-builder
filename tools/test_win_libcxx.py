@@ -13,7 +13,9 @@ required:
   * the __Cr-ABI verification gate (_verify_cr_libcxx): an archive whose symbol table
     carries `@__Cr@std@@` PASSES; one with only plain `@std@@` (MSVC STL / stock LLVM
     libc++) is a HARD FAIL — that's the whole point, it must match v8.dll.lib's ABI.
-  * the staged-lib discovery (build_win_libcxx finds libc++.lib in out/ or out/obj/).
+  * the object discovery + archive (build_win_libcxx globs the already-compiled
+    libc++/libc++abi *.obj files from out/obj/buildtools/third_party/ and archives
+    them with llvm-lib — no GN target, no ninja step, so GN visibility never blocks).
   * the manifest records lib/libc++.lib + the __Cr ABI on Windows, and DOES NOT on
     other platforms (gated to Windows, no-op elsewhere).
 
@@ -118,25 +120,35 @@ def test_build_win_libcxx_noop_off_windows():
 
 
 def test_build_win_libcxx_finds_and_stages(tmp_path=None):
-    """build_win_libcxx ninja-builds the target, finds libc++.lib (out/ or out/obj/),
-    stages it into <cell>/lib/, verifies __Cr, and returns the staged path."""
+    """build_win_libcxx globs the already-compiled libc++/libc++abi .obj files from
+    out/obj/buildtools/third_party/, archives them into <cell>/lib/libc++.lib with
+    llvm-lib, verifies __Cr, and returns the staged path. No ninja target, no GN."""
     tmp = tmp_path or _tmp("stage")
     # Redirect BUILD_DIR so the staged artifact lands in a temp cell, not the repo.
     orig_build_dir = BV8.BUILD_DIR
     BV8.BUILD_DIR = tmp / "build"
     try:
         out = tmp / "out"
-        # gn drops the archive in out/obj/ in this fixture (one of the candidate dirs).
-        (out / "obj").mkdir(parents=True)
-        produced = out / "obj" / "libc++.lib"
-        produced.write_bytes(b"!<arch>\nfake archive\n")
+        # The v8_monolith build already compiled these .obj files into the out dir.
+        for sub in BV8.WIN_LIBCXX_OBJ_SUBDIRS:
+            d = out / sub
+            d.mkdir(parents=True)
+            (d / f"{Path(sub).name}_part.obj").write_bytes(b"\x00fake obj\n")
 
         b = _make_builder("win", archs="x64")
-        calls = []
-        # Stub the ninja build + the symbol-table read (no real toolchain here).
+        archive_calls = []
+
+        # Stub the archiver invocation: emulate llvm-lib /OUT:<lib> <objs...> by
+        # writing the output file, and capture the argv so we can assert on it.
+        def fake_run(cmd, cwd=None, env=None):
+            archive_calls.append(cmd)
+            out_arg = next(a for a in cmd if str(a).startswith("/OUT:"))
+            Path(str(out_arg)[len("/OUT:"):]).write_bytes(b"!<arch>\nfake archive\n")
+
         orig_run = BV8.run
-        BV8.run = lambda *a, **k: calls.append(a)  # swallow the ninja invocation
-        b._archive_symbols = lambda lib: _CR_SYMBOLS
+        BV8.run = fake_run
+        b._win_archiver = lambda: "llvm-lib"      # skip toolchain discovery
+        b._archive_symbols = lambda lib: _CR_SYMBOLS  # skip the real nm/dumpbin read
         try:
             staged = b.build_win_libcxx(out, "x64")
         finally:
@@ -144,22 +156,29 @@ def test_build_win_libcxx_finds_and_stages(tmp_path=None):
 
         assert staged is not None, "expected a staged libc++.lib path"
         assert staged.name == "libc++.lib"
-        assert staged.exists(), "libc++.lib should have been copied into the cell lib/"
+        assert staged.exists(), "libc++.lib should have been archived into the cell lib/"
         assert staged.parent.name == "lib"
         assert "win-x64" in str(staged), f"unexpected cell dir: {staged}"
-        assert calls, "ninja should have been invoked for v8builder_win_libcxx"
+        assert archive_calls, "llvm-lib should have been invoked to archive the objs"
+        argv = archive_calls[0]
+        assert any(str(a).startswith("/OUT:") for a in argv), "archiver needs /OUT:"
+        # Both libc++ AND libc++abi objects must be in the archive argv (libc++abi
+        # carries the ABI runtime an iostreams consumer also needs).
+        joined = " ".join(str(a) for a in argv)
+        assert "libc++abi" in joined, "libc++abi objects must be archived too"
+        assert ".obj" in joined, "object files must be passed to the archiver"
     finally:
         BV8.BUILD_DIR = orig_build_dir
 
 
-def test_build_win_libcxx_missing_archive_is_hard_fail(tmp_path=None):
-    """If gn/ninja produced no libc++.lib anywhere under out/, abort (SystemExit)."""
+def test_build_win_libcxx_missing_objs_is_hard_fail(tmp_path=None):
+    """If the v8 build produced no libc++/libc++abi .obj files under out/, abort."""
     tmp = tmp_path or _tmp("missing")
     orig_build_dir = BV8.BUILD_DIR
     BV8.BUILD_DIR = tmp / "build"
     try:
         out = tmp / "out"
-        out.mkdir(parents=True)  # empty — no libc++.lib
+        out.mkdir(parents=True)  # empty — no compiled libc++ objects
         b = _make_builder("win", archs="x64")
         orig_run = BV8.run
         BV8.run = lambda *a, **k: None
@@ -170,23 +189,34 @@ def test_build_win_libcxx_missing_archive_is_hard_fail(tmp_path=None):
             raised = True
         finally:
             BV8.run = orig_run
-        assert raised, "a missing libc++.lib must hard-fail the build"
+        assert raised, "missing libc++ .obj files must hard-fail the build"
     finally:
         BV8.BUILD_DIR = orig_build_dir
 
 
-# --- GN injection gating --------------------------------------------------------
+# --- object discovery -----------------------------------------------------------
 
-def test_win_libcxx_gn_target_is_win_gated():
-    """The injected GN block is guarded by is_win && !is_component_build and archives
-    V8's OWN bundled libc++ (matching v8.dll's ABL by construction)."""
-    gn = BV8.WIN_LIBCXX_TARGET_GN
-    assert "is_win" in gn and "!is_component_build" in gn, \
-        "the libc++ target must be Windows + non-component gated"
-    assert 'output_name = "libc++"' in gn, "output must be libc++.lib"
-    assert "complete_static_lib = true" in gn, "must be a true archive, not a thin lib"
-    assert "//buildtools/third_party/libc++" in gn, \
-        "must archive V8's bundled __Cr libc++ (so the ABI matches v8.dll.lib)"
+def test_find_win_libcxx_objs_globs_both_dirs(tmp_path=None):
+    """_find_win_libcxx_objs collects *.obj from BOTH libc++ and libc++abi subtrees."""
+    tmp = tmp_path or _tmp("glob")
+    out = tmp / "out"
+    cxx = out / "obj" / "buildtools" / "third_party" / "libc++"
+    abi = out / "obj" / "buildtools" / "third_party" / "libc++abi"
+    cxx.mkdir(parents=True)
+    abi.mkdir(parents=True)
+    (cxx / "string.obj").write_bytes(b"")
+    (cxx / "ostream.obj").write_bytes(b"")
+    (abi / "cxa_throw.obj").write_bytes(b"")
+    # A non-.obj file must be ignored.
+    (cxx / "string.obj.d").write_bytes(b"")
+
+    b = _make_builder("win")
+    objs = b._find_win_libcxx_objs(out)
+    names = {p.name for p in objs}
+    assert names == {"string.obj", "ostream.obj", "cxa_throw.obj"}, \
+        f"unexpected obj set: {names}"
+    # Empty out dir yields no objects (drives the hard-fail above).
+    assert b._find_win_libcxx_objs(tmp / "empty") == []
 
 
 # --- manifest records libc++.lib on Windows -------------------------------------
