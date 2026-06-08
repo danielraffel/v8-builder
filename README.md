@@ -173,59 +173,78 @@ it catches leaks it was never told to look for.
 
 ## Consuming it
 
-Link against the library and its headers. The **ABI contract** a consumer must match:
+It's ordinary V8 — create a platform, an isolate, a context, and run JS. The only
+things to get right are the **ABI contract** (your build flags must match how the binary
+was built) and a couple of **integration footguns**. Start with the table; reach for the
+details only for your platform.
 
-- **C++ runtime:** platform `libc++`/`libstdc++` on macOS/Linux; on Windows and
-  **Android**, Chromium's `libc++` (the `__Cr` ABI namespace). On Android the NDK-libc++
-  target ABI was attempted first (`use_custom_libcxx=false`) but does not link against the
-  DEPS cipd `android_toolchain`, which ships no standalone unwinder — so `libv8.so` is
-  built with V8's bundled libc++ (folded statically; self-contained, no `libc++_shared.so`
-  dependency), and an Android consumer must compile against a Chromium-style `libc++`,
-  exactly the Windows model. RTTI is off.
-- **Windows + iostreams — link the shipped `lib/libc++.lib`:** the sealed `v8.dll`
-  exports **zero** out-of-line libc++ runtime (no `std::cout`, no `basic_string`/`ostream`
-  ctors, no `operator new`), so a Windows consumer that uses iostreams — e.g. choc's V8
-  wrapper, which Pulp's `js_v8_engine.cpp` uses — must supply its own `__Cr`-ABI libc++,
-  and the official Windows LLVM package ships none. The release therefore bundles
-  `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): a static, `__Cr`-ABI
-  libc++ **archived directly from the libc++/libc++abi object files V8 already compiled
-  for `v8.dll`** (globbed from `out/<cell>/obj/buildtools/third_party/libc++` and
-  `…/libc++abi`, then collected with V8's bundled `llvm-lib`), so its ABI matches
+### Quick reference
+
+| Platform | Compile with | Also link | Define | Re-sign? |
+|---|---|---|---|---|
+| **macOS** | clang, platform `libc++` | — | — | yes — ad-hoc signed; re-sign with your Developer ID |
+| **Linux** | clang/gcc, `libstdc++` | — | — | no |
+| **Windows** | **clang-cl** (not MSVC `cl`) | `lib/libc++.lib` + `msvcprt.lib` | `V8_COMPRESS_POINTERS` | optional (Authenticode) |
+| **Android** | NDK clang, Chromium-style `libc++` | — | — | APK signature covers it |
+| **iOS** | Xcode (framework is jitless) | — | — | yes for device; simulator slice as-shipped |
+
+### ABI contract (match the build)
+
+- **C++ runtime.** Platform `libc++`/`libstdc++` on macOS/Linux; on **Windows** and
+  **Android**, Chromium's `libc++` (the `__Cr` ABI namespace). RTTI is off. (Android detail:
+  V8's bundled libc++ is folded in statically — self-contained, no `libc++_shared.so` — so
+  an Android consumer compiles against a Chromium-style libc++, exactly the Windows model.
+  The NDK-libc++ ABI was tried first but the DEPS `android_toolchain` ships no standalone
+  unwinder.)
+- **Windows — link the bundled `lib/libc++.lib`.** The sealed `v8.dll` exports **zero**
+  out-of-line libc++ (no `std::cout`, no `basic_string`/`ostream` ctors, no `operator new`),
+  so a consumer that touches iostreams — e.g. choc's V8 wrapper — must supply a matching
+  `__Cr`-ABI libc++, and the official Windows LLVM package ships none. The release bundles
+  one as `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): archived straight
+  from the libc++/libc++abi objects V8 already compiled for `v8.dll`, so its ABI matches
   `v8.dll.lib`'s `…@__Cr@std@@` exports by construction (same clang-cl, same
-  `_LIBCPP_ABI_NAMESPACE=__Cr`). Archiving the already-built objects avoids a GN target
-  that would be rejected by `libc++`'s visibility list. Link it alongside `msvcprt.lib`;
-  the objects were compiled with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` so they don't trip an
-  `lld-link` `/FAILIFMISMATCH`. Compile your consumer with **clang-cl + that same libc++** (the
-  decided Windows ABI contract). A pure `v8::`-API consumer that never instantiates an
-  out-of-line std type may not need it; reach for it the moment you pull in `<iostream>`
-  or the choc wrapper.
-- **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
-  macOS/Linux/Android, on on Windows) — a mismatch makes `V8::Initialize` abort with an
+  `_LIBCPP_ABI_NAMESPACE=__Cr`). Link it next to `msvcprt.lib` (the objects were built with
+  `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1`, so they won't trip an `lld-link /FAILIFMISMATCH`), and
+  compile your consumer with **clang-cl + that same libc++**. A pure `v8::`-API consumer that
+  never instantiates an out-of-line std type may not need it — reach for it the moment you
+  pull in `<iostream>` or the choc wrapper.
+- **Pointer compression.** Define `V8_COMPRESS_POINTERS` to match the build (off on
+  macOS/Linux/Android, **on** on Windows). A mismatch makes `V8::Initialize` abort with an
   explicit embedder-vs-V8 message.
-- **Code signing (macOS/iOS):** the shipped `libv8.dylib` / `V8.framework` are **ad-hoc
-  (linker) signed** with no team identity — so you **re-sign them with your own** Developer
-  ID when you bundle them (`codesign --force --sign "Developer ID Application: …"`, or Xcode
-  signs the embedded framework automatically when you build your app). The iOS **device**
-  slice *requires* your signing; the **simulator** slice (shipped here) does not. The Windows
-  `v8.dll` is unsigned — Authenticode-sign it with your own cert if your distribution needs
-  it. Linux/Android `.so`s aren't signed (the Android consumer's APK signature covers it).
-- **iOS is jitless — App Store compliant *by build*:** the `V8.framework` is built
-  `v8_enable_lite_mode=true` (⇒ `v8_jitless`, no TurboFan/Maglev/Sparkplug/WASM). In V8,
-  *jitless* means "disable runtime allocation of executable memory" — so the **build config is
-  the App Store compliance boundary** (no runtime RWX/JIT; embedded builtins live in signed
-  `__TEXT`, which is fine). As a **defensive guardrail** ([V8's iOS docs](https://v8.dev/docs/cross-compile-ios)),
-  also assert it at runtime before `V8::Initialize` / choc's `createV8Context()`:
-  ```cpp
-  v8::V8::SetFlagsFromString("--jitless");   // guardrail/regression-tripwire, before init
-  ```
-  This is **redundant on a correctly-built lite binary, not load-bearing** — it just trips
-  early if someone ever links a non-jitless slice. (`--expose_gc` is **test-only**: it exposes
-  a JS `gc()` hook our validation gate uses to prove the flag took effect; omit it in
-  production.) The interpreter (Ignition) runs the full language; only the JIT tiers + WASM are
-  absent. Don't request any JIT / `MAP_JIT` entitlements. The release ships the
-  **simulator-arm64** slice; the device slice is built + signed per-app.
 
-Beyond that it's ordinary V8: create a platform, an isolate, a context, and run.
+### Integration footguns
+
+- **The snapshot is embedded — don't load an external one.** The binary is built
+  `v8_use_external_startup_data=false`, so the snapshot lives inside the image. Do **not**
+  call `V8::InitializeExternalStartupData(...)` or point V8 at an external `.bin`: it makes
+  `Snapshot::Initialize` fail its magic-number check — a deserializer abort that *looks*
+  like the Abseil ODR but isn't. Just `V8::Initialize()` and go.
+- **Using choc? Apply `patches/choc-v8.14.patch`.** choc's V8 wrapper targets an older V8
+  API; this repo ships the V8 15.1 migration it needs (`Utf8Length`→`Utf8LengthV2`,
+  `WriteUtf8`→`WriteUtf8V2`, `c->GetIsolate()->GetData`→`Isolate::GetCurrent()->GetData`).
+  This is how Pulp consumes this V8.
+- **iOS is jitless — App Store compliant *by build*.** The `V8.framework` is built
+  `v8_enable_lite_mode=true` (⇒ `v8_jitless`: no TurboFan/Maglev/Sparkplug/WASM). In V8,
+  *jitless* means "no runtime allocation of executable memory" — so the **build config is
+  the compliance boundary** (no runtime RWX/JIT; embedded builtins live in signed `__TEXT`,
+  which is fine). As a guardrail ([V8's iOS docs](https://v8.dev/docs/cross-compile-ios)),
+  also assert it before `V8::Initialize` / choc's `createV8Context()`:
+  ```cpp
+  v8::V8::SetFlagsFromString("--jitless");   // guardrail/tripwire, before init
+  ```
+  It's **redundant on a correct lite build, not load-bearing** — it just trips early if
+  someone links a non-jitless slice. (`--expose_gc` is **test-only**.) The interpreter
+  (Ignition) runs the full language; only the JIT tiers + WASM are absent. Don't request any
+  JIT / `MAP_JIT` entitlements. The release ships the **simulator-arm64** slice; the device
+  slice is built + signed per-app.
+
+### Signing
+
+The macOS `libv8.dylib` / iOS `V8.framework` are **ad-hoc (linker) signed** with no team
+identity — **re-sign them with your own** Developer ID when you bundle
+(`codesign --force --sign "Developer ID Application: …"`, or let Xcode sign the embedded
+framework automatically). The Windows `v8.dll` is unsigned — Authenticode-sign it if your
+distribution needs it. Linux/Android `.so`s aren't signed (the Android APK signature covers it).
 
 ## Coexistence is ABI + seal, not version-matching
 
