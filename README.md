@@ -73,7 +73,8 @@ simulator is deferred (all-Apple-silicon fleet).
 V8 15.1; Intl on (off on iOS). Pointer compression is **off** on macOS/Linux (for drop-in
 parity with `libnode`-style consumers) and **on** on Windows (V8's supported default there);
 Windows + Android consumers also link a Chromium-style `__Cr` libc++ — a consumer must match,
-see below.
+see below. The Windows artifact **ships that `__Cr` libc++ as `lib/libc++.lib`** so an
+iostream-using consumer (choc's V8 wrapper) doesn't have to build one.
 
 ## What a build produces
 
@@ -92,6 +93,7 @@ mac / linux:
 windows:
   include/
   lib/v8.dll + lib/v8.dll.lib   # sealed DLL + import lib (PE carries no embedded debug → no strip)
+  lib/libc++.lib                # the __Cr-ABI static libc++ for iostream/std consumers (see "Consuming it")
   manifest.json
 android:
   include/
@@ -180,6 +182,23 @@ Link against the library and its headers. The **ABI contract** a consumer must m
   built with V8's bundled libc++ (folded statically; self-contained, no `libc++_shared.so`
   dependency), and an Android consumer must compile against a Chromium-style `libc++`,
   exactly the Windows model. RTTI is off.
+- **Windows + iostreams — link the shipped `lib/libc++.lib`:** the sealed `v8.dll`
+  exports **zero** out-of-line libc++ runtime (no `std::cout`, no `basic_string`/`ostream`
+  ctors, no `operator new`), so a Windows consumer that uses iostreams — e.g. choc's V8
+  wrapper, which Pulp's `js_v8_engine.cpp` uses — must supply its own `__Cr`-ABI libc++,
+  and the official Windows LLVM package ships none. The release therefore bundles
+  `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): a static, `__Cr`-ABI
+  libc++ **archived directly from the libc++/libc++abi object files V8 already compiled
+  for `v8.dll`** (globbed from `out/<cell>/obj/buildtools/third_party/libc++` and
+  `…/libc++abi`, then collected with V8's bundled `llvm-lib`), so its ABI matches
+  `v8.dll.lib`'s `…@__Cr@std@@` exports by construction (same clang-cl, same
+  `_LIBCPP_ABI_NAMESPACE=__Cr`). Archiving the already-built objects avoids a GN target
+  that would be rejected by `libc++`'s visibility list. Link it alongside `msvcprt.lib`;
+  the objects were compiled with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` so they don't trip an
+  `lld-link` `/FAILIFMISMATCH`. Compile your consumer with **clang-cl + that same libc++** (the
+  decided Windows ABI contract). A pure `v8::`-API consumer that never instantiates an
+  out-of-line std type may not need it; reach for it the moment you pull in `<iostream>`
+  or the choc wrapper.
 - **Pointer compression:** define `V8_COMPRESS_POINTERS` to match the build (off on
   macOS/Linux/Android, on on Windows) — a mismatch makes `V8::Initialize` abort with an
   explicit embedder-vs-V8 message.
