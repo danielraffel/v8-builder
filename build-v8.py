@@ -760,27 +760,57 @@ class V8Build:
 
     # Dump an archive's symbol table to text. llvm-nm reads COFF archives on any host
     # (so an arm64 cross-built .lib audits on the x64 runner); dumpbin is the MSVC
-    # fallback. Returns the combined stdout; raises if neither tool can read the archive.
+    # fallback. Returns the combined stdout; raises if no tool can read the archive.
+    #
+    # nm-locating order (each one tried only if it exists/resolves):
+    #   1. the V8-bundled llvm-nm (third_party/llvm-build) — present on cross builds;
+    #   2. an llvm-nm SIBLING of the archiver we actually used (e.g. the system LLVM
+    #      at C:\Program Files\LLVM\bin that provided llvm-lib on the windows-2022
+    #      runner — V8 there uses system LLVM, not the bundled toolchain);
+    #   3. a PATH-resolved llvm-nm;
+    #   4. MSVC `dumpbin /SYMBOLS` (only if it's actually on PATH).
     def _archive_symbols(self, lib):
-        llvm_nm = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-nm.exe"
-        if not llvm_nm.exists():
-            alt = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-nm"
-            llvm_nm = alt if alt.exists() else None
-        if llvm_nm is not None:
-            proc = subprocess.run([str(llvm_nm), str(lib)],
+        for nm in self._nm_candidates():
+            proc = subprocess.run([str(nm), str(lib)],
                                   capture_output=True, text=True, env=self.env)
             if proc.returncode == 0 and proc.stdout:
                 return proc.stdout
-            say(f"llvm-nm could not read {lib.name} ({proc.stderr.strip()}); "
-                f"trying dumpbin", Colors.WARN)
-        # MSVC dumpbin fallback (resolved via the shell so PATH/.bat semantics apply).
-        proc = subprocess.run("dumpbin /SYMBOLS " + subprocess.list2cmdline([str(lib)]),
-                              capture_output=True, text=True, env=self.env, shell=True)
-        if proc.returncode == 0 and proc.stdout:
-            return proc.stdout
+            say(f"{Path(nm).name} could not read {lib.name} "
+                f"({proc.stderr.strip()}); trying next reader", Colors.WARN)
+        # MSVC dumpbin fallback — only if it resolves (shell so PATH/.bat semantics apply).
+        if shutil.which("dumpbin"):
+            proc = subprocess.run(
+                "dumpbin /SYMBOLS " + subprocess.list2cmdline([str(lib)]),
+                capture_output=True, text=True, env=self.env, shell=True)
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+            say(f"dumpbin could not read {lib.name} ({proc.stderr.strip()})",
+                Colors.WARN)
         raise SystemExit(
-            f"could not read symbols from {lib} (no usable llvm-nm or dumpbin): "
-            f"{proc.stderr.strip()}")
+            f"could not read symbols from {lib}: no usable llvm-nm "
+            f"(bundled / archiver-sibling / PATH) or dumpbin found")
+
+    # Ordered, existence-checked list of llvm-nm executables to try.
+    def _nm_candidates(self):
+        out = []
+        for ext in (".exe", ""):
+            p = V8_DIR / f"third_party/llvm-build/Release+Asserts/bin/llvm-nm{ext}"
+            if p.exists():
+                out.append(p)
+        # Sibling of the archiver actually used (system LLVM bin on the win runner).
+        try:
+            arch_bin = Path(self._win_archiver()).parent
+            for ext in (".exe", ""):
+                sib = arch_bin / f"llvm-nm{ext}"
+                if sib.exists() and sib not in out:
+                    out.append(sib)
+        except SystemExit:
+            pass  # no archiver located — nm sibling lookup is best-effort
+        # PATH-resolved llvm-nm.
+        found = shutil.which("llvm-nm")
+        if found and Path(found) not in out:
+            out.append(Path(found))
+        return out
 
     # Run the seal backend's `audit` over `lib` and return the integer export count it
     # reports ("AUDIT OK — <N> exports ..."). A non-zero exit (any seal leak / no exports)
