@@ -184,7 +184,7 @@ details only for your platform.
 |---|---|---|---|---|
 | **macOS** | clang, platform `libc++` | — | — | yes — ad-hoc signed; re-sign with your Developer ID |
 | **Linux** | clang/gcc, `libstdc++` | — | — | no |
-| **Windows** | **clang-cl** (not MSVC `cl`) | `lib/libc++.lib` + `msvcprt.lib` | `V8_COMPRESS_POINTERS` | optional (Authenticode) |
+| **Windows** | **clang-cl** (not MSVC `cl`) | `msvcprt.lib` (+ `lib/libc++.lib` **only if** you use iostreams/`std::` types or choc — see below) | `V8_COMPRESS_POINTERS` | optional (Authenticode) |
 | **Android** | NDK clang, Chromium-style `libc++` | — | — | APK signature covers it |
 | **iOS** | Xcode (framework is jitless) | — | — | yes for device; simulator slice as-shipped |
 
@@ -196,18 +196,19 @@ details only for your platform.
   an Android consumer compiles against a Chromium-style libc++, exactly the Windows model.
   The NDK-libc++ ABI was tried first but the DEPS `android_toolchain` ships no standalone
   unwinder.)
-- **Windows — link the bundled `lib/libc++.lib`.** The sealed `v8.dll` exports **zero**
-  out-of-line libc++ (no `std::cout`, no `basic_string`/`ostream` ctors, no `operator new`),
-  so a consumer that touches iostreams — e.g. choc's V8 wrapper — must supply a matching
-  `__Cr`-ABI libc++, and the official Windows LLVM package ships none. The release bundles
-  one as `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): archived straight
-  from the libc++/libc++abi objects V8 already compiled for `v8.dll`, so its ABI matches
+- **Windows — link the bundled `lib/libc++.lib`, but only when you cross the `std::`
+  boundary.** *Need it if* your consumer instantiates an out-of-line `std::` type that
+  crosses the V8 link boundary — `<iostream>`, `basic_string`/`ostream` ctors, `operator
+  new`. **choc's V8 wrapper does, so choc users always need it.** *Skip it if* you stay on
+  the pure `v8::` API and never touch those std types. Why it exists: the sealed `v8.dll`
+  exports **zero** out-of-line libc++, MSVC's STL ABI doesn't match V8's `__Cr` libc++, and
+  the official Windows LLVM package ships no `__Cr` libc++ — so the release bundles one as
+  `lib/libc++.lib` (recorded as `libcxx_lib` in `manifest.json`): archived straight from the
+  libc++/libc++abi objects V8 already compiled for `v8.dll`, so its ABI matches
   `v8.dll.lib`'s `…@__Cr@std@@` exports by construction (same clang-cl, same
-  `_LIBCPP_ABI_NAMESPACE=__Cr`). Link it next to `msvcprt.lib` (the objects were built with
-  `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1`, so they won't trip an `lld-link /FAILIFMISMATCH`), and
-  compile your consumer with **clang-cl + that same libc++**. A pure `v8::`-API consumer that
-  never instantiates an out-of-line std type may not need it — reach for it the moment you
-  pull in `<iostream>` or the choc wrapper.
+  `_LIBCPP_ABI_NAMESPACE=__Cr`). When you do need it: link it next to `msvcprt.lib` (the
+  objects were built with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1`, so they won't trip an
+  `lld-link /FAILIFMISMATCH`) and compile with **clang-cl + that same libc++**.
 - **Pointer compression.** Define `V8_COMPRESS_POINTERS` to match the build (off on
   macOS/Linux/Android, **on** on Windows). A mismatch makes `V8::Initialize` abort with an
   explicit embedder-vs-V8 message.
