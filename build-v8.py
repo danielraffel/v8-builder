@@ -407,6 +407,49 @@ if ((is_mac || is_ios || is_linux || is_win || is_android) && v8_monolithic) {
 '''
 
 
+# >>> v8-builder Windows __Cr libc++ static lib (task #17) -----------------------
+# A Windows consumer that uses iostreams (e.g. choc's V8 wrapper, which Pulp's
+# js_v8_engine.cpp uses) needs an out-of-line libc++ runtime, because the sealed
+# v8.dll exports ZERO libc++ (no std::cout, no basic_string/ostream ctors, no
+# operator new — they're all internal to the DLL). The official Windows LLVM
+# package ships no __Cr-ABI libc++, so the consumer would have to hand-build one.
+#
+# V8 ALREADY compiles its bundled libc++ from //buildtools/third_party/libc++
+# with the exact __Cr ABI (`_LIBCPP_ABI_NAMESPACE=__Cr`), the exact clang-cl
+# toolchain, and the exact flags v8.dll was built with — including the
+# _LIBCPP_HAS_NO_... posture and the vcruntime C++ ABI. So instead of running a
+# SECOND, drift-prone CMake build of llvm-project's `runtimes` by hand (the
+# Pulp #27 recipe: LIBCXX_ABI_NAMESPACE=__Cr, LIBCXX_CXX_ABI=vcruntime, RTTI +
+# exceptions ON, static), we archive V8's OWN already-built libc++ objects into a
+# `libc++.lib`. This is byte-for-byte the same ABI as v8.dll.lib's
+# `...@__Cr@std@@` exports BY CONSTRUCTION — same compiler invocation, no
+# second-toolchain skew to maintain.
+#
+# `complete_static_lib = true` makes gn emit a TRUE archive (all member .obj
+# files), not a thin/import lib — so the consumer links it directly. The dep is
+# the same `//buildtools/third_party/libc++` target the v8_monolith linked, so
+# the objects are identical to the ones folded into v8.dll. It links against
+# `msvcprt.lib` and needs `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1` to dodge an
+# lld-link /FAILIFMISMATCH on the STDIO-wide-specifier marker — V8's own libc++
+# config already sets that, so archiving its objects inherits the right marker.
+WIN_LIBCXX_TARGET_GN = '''\
+# >>> v8-builder win __Cr libc++ static lib (injected)
+if (is_win && v8_monolithic && !is_component_build) {
+  static_library("v8builder_win_libcxx") {
+    output_name = "libc++"
+    # TRUE archive of all member objects (not a thin/import lib) so a consumer
+    # links the libc++ runtime directly. Whole-archive at consume time is the
+    # consumer's call; the archive carries every object either way.
+    complete_static_lib = true
+    sources = []
+    # The SAME bundled libc++ target the v8_monolith linked — its objects carry
+    # the __Cr ABI namespace and were built with v8.dll's exact clang-cl flags.
+    deps = [ "//buildtools/third_party/libc++" ]
+  }
+}
+'''
+
+
 class Colors:
     OK = '\033[92m'; WARN = '\033[93m'; FAIL = '\033[91m'; END = '\033[0m'
 
@@ -531,8 +574,15 @@ class V8Build:
                 encoding="utf-8")
             run([sys.executable, str(SEAL_DIR / "elf.py"), "version-script",
                  "--out", str(V8_DIR / "v8_embedder_exports.map")], env=self.env)
-        build_gn.write_text(text + "\n" + SEAL_TARGET_GN + "\n", encoding="utf-8")
+        gn_blocks = "\n" + SEAL_TARGET_GN + "\n"
+        if self.args.platform == "win":
+            # Ship a __Cr-ABI libc++.lib alongside v8.dll so a Windows consumer using
+            # iostreams (choc's V8 wrapper) doesn't have to hand-build one (task #17).
+            gn_blocks += "\n" + WIN_LIBCXX_TARGET_GN + "\n"
+        build_gn.write_text(text + gn_blocks, encoding="utf-8")
         say("injected v8_sealed_shared gn target")
+        if self.args.platform == "win":
+            say("injected v8builder_win_libcxx (__Cr libc++.lib) gn target")
 
     def _cell_id(self, arch):
         # iOS has TWO axes (env + arch) so its output/dist dir is ios-<env>-<arch>
@@ -611,6 +661,82 @@ class V8Build:
         if self.args.platform == "ios":
             produced = self.wrap_ios_framework(dest, produced, arch)
         return produced
+
+    # Build + stage + verify the __Cr-ABI libc++.lib (task #17). No-op off Windows.
+    #
+    # The sealed v8.dll exports ZERO out-of-line libc++ runtime, so a Windows consumer
+    # using iostreams (choc's V8 wrapper) must supply its own __Cr-ABI libc++ — which
+    # the official LLVM Windows package does not ship. We archive V8's OWN bundled
+    # libc++ objects (same clang-cl, same _LIBCPP_ABI_NAMESPACE=__Cr, same flags v8.dll
+    # used) into lib/libc++.lib, so the ABI matches v8.dll.lib's `...@__Cr@std@@`
+    # exports BY CONSTRUCTION. Staged next to v8.dll + v8.dll.lib.
+    def build_win_libcxx(self, out, arch):
+        if self.args.platform != "win":
+            return None
+        run(["ninja", "-C", str(out), "v8builder_win_libcxx"], cwd=V8_DIR, env=self.env)
+        # gn emits a static_library output_name="libc++" as libc++.lib in $root_out_dir
+        # (clang-cl/MSVC archives are <output_name>.lib). Some toolchains emit obj/<...>;
+        # check the common locations.
+        candidates = [out / "libc++.lib", out / "obj" / "libc++.lib"]
+        produced = next((c for c in candidates if c.exists()), None)
+        if produced is None:
+            # last resort: find any libc++.lib gn dropped under out/
+            found = list(out.rglob("libc++.lib"))
+            produced = found[0] if found else None
+        if produced is None:
+            raise SystemExit(
+                "expected __Cr libc++.lib not produced by v8builder_win_libcxx "
+                f"(looked in {out} and out/obj)")
+        dest = BUILD_DIR / self._cell_id(arch) / "lib"
+        dest.mkdir(parents=True, exist_ok=True)
+        staged = dest / "libc++.lib"
+        shutil.copy2(produced, staged)
+        self._verify_cr_libcxx(staged, arch)
+        say(f"staged __Cr libc++.lib -> {staged}")
+        return staged
+
+    # Hard-gate: the archive MUST carry the __Cr ABI namespace (mangled `@__Cr@std@@`),
+    # matching v8.dll.lib's exports. A plain MSVC-STL or stock-LLVM libc++ would carry
+    # `@std@@` WITHOUT the __Cr inline-namespace tag and silently mis-link against v8.dll.
+    # We grep the archive's symbol table. Prefer llvm-nm/llvm-ar (V8-bundled, reads COFF
+    # archives on any host, so this gate runs even on a cross-built arm64 .lib produced on
+    # the x64 runner); fall back to `dumpbin /SYMBOLS` when only MSVC tools are present.
+    def _verify_cr_libcxx(self, lib, arch):
+        text = self._archive_symbols(lib)
+        if "@__Cr@std@@" not in text:
+            # Surface a sample of std:: symbols to make a regression diagnosable.
+            sample = "\n".join(l for l in text.splitlines()
+                               if "std@@" in l or "basic_string" in l)[:1500]
+            say(f"FAIL: {lib.name} carries NO __Cr-ABI symbols (@__Cr@std@@). It does "
+                f"NOT match v8.dll.lib's ABI — a consumer would mis-link.\n"
+                f"sample std symbols:\n{sample}", Colors.FAIL)
+            raise SystemExit(1)
+        say(f"verified {lib.name} carries the __Cr ABI (@__Cr@std@@ present) — "
+            f"matches v8.dll.lib", Colors.OK)
+
+    # Dump an archive's symbol table to text. llvm-nm reads COFF archives on any host
+    # (so an arm64 cross-built .lib audits on the x64 runner); dumpbin is the MSVC
+    # fallback. Returns the combined stdout; raises if neither tool can read the archive.
+    def _archive_symbols(self, lib):
+        llvm_nm = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-nm.exe"
+        if not llvm_nm.exists():
+            alt = V8_DIR / "third_party/llvm-build/Release+Asserts/bin/llvm-nm"
+            llvm_nm = alt if alt.exists() else None
+        if llvm_nm is not None:
+            proc = subprocess.run([str(llvm_nm), str(lib)],
+                                  capture_output=True, text=True, env=self.env)
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+            say(f"llvm-nm could not read {lib.name} ({proc.stderr.strip()}); "
+                f"trying dumpbin", Colors.WARN)
+        # MSVC dumpbin fallback (resolved via the shell so PATH/.bat semantics apply).
+        proc = subprocess.run("dumpbin /SYMBOLS " + subprocess.list2cmdline([str(lib)]),
+                              capture_output=True, text=True, env=self.env, shell=True)
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+        raise SystemExit(
+            f"could not read symbols from {lib} (no usable llvm-nm or dumpbin): "
+            f"{proc.stderr.strip()}")
 
     # Run the seal backend's `audit` over `lib` and return the integer export count it
     # reports ("AUDIT OK — <N> exports ..."). A non-zero exit (any seal leak / no exports)
@@ -838,6 +964,20 @@ class V8Build:
             # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
             "pair": self._lkgr_contract(),
         }
+        if self.args.platform == "win":
+            # v8.dll exports zero out-of-line libc++; a consumer using iostreams must link
+            # the __Cr-ABI libc++.lib we ship alongside (task #17). Record it + the ABI so
+            # a consumer knows which STL/ABI to match. import_lib is the existing
+            # v8::-surface import library.
+            manifest["libcxx"] = "bundled-chromium-__Cr"
+            manifest["import_lib"] = "lib/v8.dll.lib"
+            cxx = dest / "lib" / "libc++.lib"
+            if cxx.exists():
+                manifest["libcxx_lib"] = "lib/libc++.lib"
+                manifest["libcxx_note"] = (
+                    "static __Cr-ABI libc++ for iostream/std consumers (e.g. choc's V8 "
+                    "wrapper); link alongside msvcprt.lib. v8.dll exports no out-of-line "
+                    "libc++ runtime. ABI matches v8.dll.lib (@__Cr@std@@).")
         if self.args.platform == "android":
             # No skia-builder Android asset exists (skia-builder publishes no
             # skia-build-android-*); Pulp builds Android Skia locally. So the Android
@@ -1094,6 +1234,9 @@ class V8Build:
         for arch in archs:
             out = self.gn_gen(arch)
             sealed = self.build_sealed(out, arch)
+            # Windows: stage the __Cr libc++.lib into lib/ BEFORE package() so the
+            # manifest records it (task #17). No-op off Windows.
+            self.build_win_libcxx(out, arch)
             self.package(sealed, arch)
             if self.args.platform == "win":
                 self.validate_win_identity(out, arch)
