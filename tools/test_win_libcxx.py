@@ -219,6 +219,39 @@ def test_find_win_libcxx_objs_globs_both_dirs(tmp_path=None):
     assert b._find_win_libcxx_objs(tmp / "empty") == []
 
 
+def test_find_win_libcxx_objs_nested_and_secondary_toolchain(tmp_path=None):
+    """gn nests the objs one dir deeper (.../libc++/libc++/*.obj), and a secondary
+    toolchain lands them under out/<toolchain>/obj/... (observed on the cross iOS lane).
+    The primary rglob handles the nesting; the whole-tree fallback handles the
+    secondary-toolchain dir. Either way each object is collected exactly once."""
+    tmp = tmp_path or _tmp("nested")
+
+    # (a) native layout, nested one level: primary rglob must find it (no double-count
+    # even though both .../libc++ and .../libc++/libc++ match the fallback's name test).
+    native = tmp / "native"
+    deep = native / "obj" / "buildtools" / "third_party" / "libc++" / "libc++"
+    deep.mkdir(parents=True)
+    (deep / "ostream.obj").write_bytes(b"")
+    b = _make_builder("win")
+    got = b._find_win_libcxx_objs(native)
+    assert [p.name for p in got] == ["ostream.obj"], f"nested native: {got}"
+    assert len(got) == len(set(got)), "objects must not be double-counted"
+
+    # (b) secondary-toolchain layout: objs ONLY under out/clang_x64/obj/... — the
+    # primary path is empty, so the whole-tree fallback must pick them up.
+    sec = tmp / "secondary"
+    cxx = sec / "clang_x64" / "obj" / "buildtools" / "third_party" / "libc++" / "libc++"
+    abi = sec / "clang_x64" / "obj" / "buildtools" / "third_party" / "libc++abi" / "libc++abi"
+    cxx.mkdir(parents=True)
+    abi.mkdir(parents=True)
+    (cxx / "new.obj").write_bytes(b"")
+    (abi / "cxa_throw.obj").write_bytes(b"")
+    got2 = b._find_win_libcxx_objs(sec)
+    assert {p.name for p in got2} == {"new.obj", "cxa_throw.obj"}, \
+        f"secondary-toolchain fallback miss: {got2}"
+    assert len(got2) == len(set(got2)), "secondary objects must not be double-counted"
+
+
 # --- manifest records libc++.lib on Windows -------------------------------------
 
 def test_manifest_libcxx_field_shape():

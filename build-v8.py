@@ -685,23 +685,27 @@ class V8Build:
 
     # Glob the already-compiled libc++ + libc++abi .obj files V8 produced for the
     # v8_monolith build. Primary path is out/obj/buildtools/third_party/{libc++,
-    # libc++abi}/**/*.obj; if a checkout lays the objects out differently, fall back
-    # to an rglob under out/obj/buildtools/third_party/ for those two dirs.
+    # libc++abi}/**/*.obj (the native-toolchain layout). gn nests the objects one
+    # level deeper (.../libc++/libc++/*.obj) and a SECONDARY-toolchain build lands
+    # them under out/<toolchain>/obj/... (observed on the cross iOS lane), so if the
+    # primary path is empty, fall back to an rglob over the WHOLE out dir for any
+    # obj/buildtools/third_party/{libc++,libc++abi} subtree.
     def _find_win_libcxx_objs(self, out):
         objs = []
         for sub in WIN_LIBCXX_OBJ_SUBDIRS:
             base = out / sub
             if base.is_dir():
-                objs.extend(sorted(base.rglob("*.obj")))
-        if objs:
-            return objs
-        # Fallback: the third_party tree may nest the libc++/libc++abi dirs deeper.
-        tp = out / "obj" / "buildtools" / "third_party"
-        if tp.is_dir():
-            for d in sorted(tp.rglob("*")):
-                if d.is_dir() and d.name in ("libc++", "libc++abi"):
-                    objs.extend(sorted(d.rglob("*.obj")))
-        return objs
+                objs.extend(base.rglob("*.obj"))
+        if not objs:
+            # Secondary-toolchain or deeper layout: scan the whole out tree for any
+            # libc++/libc++abi dir that sits under an obj/buildtools/third_party path.
+            for d in out.rglob("*"):
+                if (d.is_dir() and d.name in ("libc++", "libc++abi")
+                        and "buildtools" in d.parts and "third_party" in d.parts
+                        and "obj" in d.parts):
+                    objs.extend(d.rglob("*.obj"))
+        # Dedupe (nested rglob can double-count) and order deterministically.
+        return sorted(set(objs))
 
     # Archive the object files into a TRUE static lib with V8's bundled llvm-lib
     # (so the archive carries the SAME __Cr objects v8.dll was built from). Prefer
