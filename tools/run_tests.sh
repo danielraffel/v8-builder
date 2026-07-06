@@ -29,19 +29,27 @@ TESTS=(
   tools/test_lean_packaging.py
 )
 
+fail=0
+
 if "$PY" -c "import pytest" >/dev/null 2>&1; then
   echo "==> running unit tests via pytest"
-  exec "$PY" -m pytest "${TESTS[@]}" "$@"
-fi
-
-echo "==> pytest not installed; running each test file standalone"
-fail=0
-for t in "${TESTS[@]}"; do
-  echo "------------------------------------------------------------"
-  if ! "$PY" "$t"; then
+  if ! "$PY" -m pytest "${TESTS[@]}" "$@"; then
     fail=1
   fi
-done
+else
+  echo "==> pytest not installed; running each test file standalone"
+  for t in "${TESTS[@]}"; do
+    echo "------------------------------------------------------------"
+    if ! "$PY" "$t"; then
+      fail=1
+    fi
+  done
+fi
+
+echo "------------------------------------------------------------"
+if ! bash .github/scripts/test-report-build-failure.sh; then
+  fail=1
+fi
 
 echo "------------------------------------------------------------"
 if [ "$fail" -ne 0 ]; then

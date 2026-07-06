@@ -5,9 +5,14 @@
 # a real runner of that OS (GitHub-hosted or self-hosted Tart) — they are not provable
 # on a macOS host. Do not treat a lane as validated until this workflow runs it green.
 name: Build V8
+run-name: ${{ inputs.release_target_id || inputs.v8_revision || inputs.v8_version || 'synced-tip' }}
 on:
   workflow_dispatch:
     inputs:
+      release_target_id:
+        description: 'Stable target id for automation/watchdog reports (normally omitted)'
+        required: false
+        type: string
       v8_version:
         description: 'V8 exact tag/version for manual builds (omit when v8_revision is set)'
         required: false

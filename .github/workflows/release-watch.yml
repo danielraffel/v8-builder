@@ -122,16 +122,20 @@ jobs:
           fi
 
           if [ "$WATCH_MODE" = "tag" ]; then
+            TARGET_ID="v8-$FORCE_VERSION"
             gh workflow run build-v8.yml --repo "${{ github.repository }}" \
               -f platforms=all \
+              -f release_target_id="$TARGET_ID" \
               -f v8_version="$FORCE_VERSION" \
               -f skia_release_tag="$SKIA_RELEASE" \
               -f skip_release="$SKIP"
             TITLE="V8 $FORCE_VERSION forced — auto-sweep dispatched ($ACTION)"
             BODY="release-watch was manually forced to V8 $FORCE_VERSION. Dispatched build-v8.yml (all platforms + single-SHA gate) against Skia validation release $SKIA_RELEASE — mode: $ACTION."
           else
+            TARGET_ID="chromium-lkgr-${LKGR_V8:0:12}"
             gh workflow run build-v8.yml --repo "${{ github.repository }}" \
               -f platforms=all \
+              -f release_target_id="$TARGET_ID" \
               -f v8_revision="$LKGR_V8" \
               -f lkgr_lock_b64="$LKGR_LOCK_B64" \
               -f skia_release_tag="$SKIA_RELEASE" \
