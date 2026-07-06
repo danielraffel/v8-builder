@@ -30,10 +30,9 @@ def _ccache_args():
     # Big CI win: cache compiled objects across runs so a re-run only recompiles the few
     # TUs that changed (seal/ABI tweaks, the link) — minutes instead of a full ~1h build.
     # Auto-on only when ccache is in PATH (CI installs it); local builds (already fast via
-    # the persistent build dir) are unaffected. use_remoteexec=false so cc_wrapper isn't
-    # overridden by V8's reclient/RBE detection.
+    # the persistent build dir) are unaffected.
     if shutil.which("ccache"):
-        return ['cc_wrapper="ccache"', 'use_remoteexec=false']
+        return ['cc_wrapper="ccache"']
     return []
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -82,6 +81,10 @@ def common_gn_args():
         # or V8::Initialize aborts with an embedder-vs-V8 mismatch. Keep OFF for
         # drop-in parity. (V8 defaults this ON for 64-bit.)
         'v8_enable_pointer_compression=false',
+        # V8's Chromium checkout can default to remote-exec Apple SDK symlinks
+        # (sdk/xcode_links) even when this standalone builder invokes ninja locally.
+        # Pin local execution so Xcode tools resolve the real SDK path.
+        'use_remoteexec=false',
         'treat_warnings_as_errors=false',
         'symbol_level=1',
     ] + _ccache_args()

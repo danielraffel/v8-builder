@@ -57,6 +57,33 @@ def _make_builder(platform, **extra):
     return BV8.V8Build(args)
 
 
+# --- GN arg contract ------------------------------------------------------------
+
+def test_common_gn_args_pin_local_execution_even_without_ccache():
+    """Standalone builds must not inherit Chromium remoteexec SDK symlink behavior."""
+    orig_which = BV8.shutil.which
+    try:
+        BV8.shutil.which = lambda _name: None
+        args = BV8.common_gn_args()
+    finally:
+        BV8.shutil.which = orig_which
+
+    assert "use_remoteexec=false" in args
+    assert not any(arg.startswith("cc_wrapper=") for arg in args)
+
+
+def test_common_gn_args_do_not_duplicate_remoteexec_when_ccache_is_present():
+    orig_which = BV8.shutil.which
+    try:
+        BV8.shutil.which = lambda name: "/usr/bin/ccache" if name == "ccache" else None
+        args = BV8.common_gn_args()
+    finally:
+        BV8.shutil.which = orig_which
+
+    assert args.count("use_remoteexec=false") == 1
+    assert args.count('cc_wrapper="ccache"') == 1
+
+
 # --- _copy_headers cruft filter -------------------------------------------------
 
 def _build_fixture_include(root):
