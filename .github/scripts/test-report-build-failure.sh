@@ -77,7 +77,7 @@ grep -Fq "V8 Auto-Update Failure: chromium-lkgr-abcdef123456" "$REPORT"
 grep -Fq "build-v8 (mac, arm64)" "$REPORT"
 grep -Fq "Run conclusion: \`cancelled\`" "$REPORT"
 grep -Fq "https://github.com/danielraffel/v8-builder/actions/runs/12345" "$REPORT"
-grep -Fq "@codex fix the CI failures for chromium-lkgr-abcdef123456" "$REPORT"
+grep -Fq "@codex fix the CI failures/stall for chromium-lkgr-abcdef123456" "$REPORT"
 grep -Fq "Do not publish manually" "$REPORT"
 
 REPORT_DIR="$TMP/cancelled-reports" \

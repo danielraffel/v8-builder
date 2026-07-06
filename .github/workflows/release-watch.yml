@@ -9,6 +9,10 @@
 # mode=publish is selected. Set V8_WATCH_AUTOPUBLISH=true to make manual/default runs publish
 # too, or use force_version to build an exact legacy V8 tag outside LKGR mode.
 #
+# AUTOMATION ROUTING: release-watch dispatches Build V8 with force_github_runners=true so
+# weekly publishing does not silently queue behind stale self-hosted runner variables.
+# Direct/manual build-v8.yml runs can still opt into configured self-hosted runners.
+#
 # CADENCE: weekly. Chromium LKGR can advance many times per day, including unrelated DEPS
 # rolls. This watcher intentionally ignores unrelated Chromium rolls and samples the latest
 # Skia/V8/Dawn tuple once a week.
@@ -128,7 +132,8 @@ jobs:
               -f release_target_id="$TARGET_ID" \
               -f v8_version="$FORCE_VERSION" \
               -f skia_release_tag="$SKIA_RELEASE" \
-              -f skip_release="$SKIP"
+              -f skip_release="$SKIP" \
+              -f force_github_runners=true
             TITLE="V8 $FORCE_VERSION forced — auto-sweep dispatched ($ACTION)"
             BODY="release-watch was manually forced to V8 $FORCE_VERSION. Dispatched build-v8.yml (all platforms + single-SHA gate) against Skia validation release $SKIA_RELEASE — mode: $ACTION."
           else
@@ -139,7 +144,8 @@ jobs:
               -f v8_revision="$LKGR_V8" \
               -f lkgr_lock_b64="$LKGR_LOCK_B64" \
               -f skia_release_tag="$SKIA_RELEASE" \
-              -f skip_release="$SKIP"
+              -f skip_release="$SKIP" \
+              -f force_github_runners=true
             TITLE="Chromium LKGR tuple changed — V8 ${LKGR_V8:0:12} dispatched ($ACTION)"
             BODY="$(printf '%s\n\nChromium: %s\nSkia: %s\nV8: %s\nDawn: %s' \
               "release-watch detected a new Chromium LKGR Skia/V8/Dawn tuple (last release: ${LAST_TAG:-<none>}). Dispatched build-v8.yml (all platforms + single-SHA gate) with V8 $LKGR_V8 against Skia validation release $SKIA_RELEASE — mode: $ACTION." \

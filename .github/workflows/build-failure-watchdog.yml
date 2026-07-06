@@ -4,6 +4,9 @@ on:
   workflow_run:
     workflows: ["Build V8"]
     types: [completed]
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -14,7 +17,8 @@ permissions:
 jobs:
   report:
     if: >-
-      ${{ github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+      ${{ github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch &&
           (github.event.workflow_run.conclusion == 'failure' ||
            github.event.workflow_run.conclusion == 'timed_out' ||
            github.event.workflow_run.conclusion == 'startup_failure' ||
@@ -39,3 +43,21 @@ jobs:
           FAILED_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: bash .github/scripts/report-build-failure.sh
+
+  report-stale:
+    if: >-
+      ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.CODEX_TRIGGER_TOKEN || github.token }}
+
+      - name: Create stale-run handoff
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_TOKEN || github.token }}
+          RELEASE_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          STALE_MINUTES: "90"
+        run: bash .github/scripts/report-stale-build-runs.sh

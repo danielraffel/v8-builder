@@ -63,12 +63,17 @@ import sys
 
 data = json.loads(os.environ["JOBS_JSON"])
 jobs = data.get("jobs") or []
-bad = [j for j in jobs if (j.get("conclusion") or "").lower() in {
+stale = (os.environ.get("FAILED_RUN_CONCLUSION") or "").startswith("stale")
+bad_states = {
     "failure",
     "timed_out",
     "startup_failure",
     "action_required",
-}]
+}
+if stale:
+    bad_states.add("queued")
+bad = [j for j in jobs if ((j.get("conclusion") or j.get("status") or "").lower()
+                           in bad_states)]
 if not bad:
     bad = jobs
 for job in bad:
@@ -88,12 +93,17 @@ import json
 import os
 
 jobs = json.loads(os.environ["JOBS_JSON"]).get("jobs") or []
-bad = [j for j in jobs if (j.get("conclusion") or "").lower() in {
+stale = (os.environ.get("FAILED_RUN_CONCLUSION") or "").startswith("stale")
+bad_states = {
     "failure",
     "timed_out",
     "startup_failure",
     "action_required",
-}]
+}
+if stale:
+    bad_states.add("queued")
+bad = [j for j in jobs if ((j.get("conclusion") or j.get("status") or "").lower()
+                           in bad_states)]
 print(len(bad))
 PY
 )"
@@ -103,9 +113,9 @@ if [ "$FAILED_RUN_CONCLUSION" = "cancelled" ] && [ "$FAILED_JOB_COUNT" = "0" ]; 
   exit 0
 fi
 
-CODEX_PROMPT="@codex fix the CI failures for ${TARGET_ID}.
+CODEX_PROMPT="@codex fix the CI failures/stall for ${TARGET_ID}.
 
-Inspect the failed GitHub Actions jobs and logs for run ${FAILED_RUN_ID}, make the smallest repo change that fixes the failure, and push the fix to this PR branch. Do not publish manually, and do not manually create or update V8 releases; release publication must happen only through build-v8.yml after CI is green."
+Inspect the failed or stalled GitHub Actions jobs and logs for run ${FAILED_RUN_ID}, make the smallest repo change that fixes the failure/stall, and push the fix to this PR branch. Do not publish manually, and do not manually create or update V8 releases; release publication must happen only through build-v8.yml after CI is green."
 
 mkdir -p "$REPORT_DIR"
 cat > "$REPORT_FILE" <<EOF
