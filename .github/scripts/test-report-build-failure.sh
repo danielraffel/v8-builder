@@ -50,6 +50,27 @@ JSON
   exit 0
 fi
 
+if [ "$1" = "run" ] && [ "$2" = "view" ] && [ "$3" = "33333" ]; then
+  cat <<'JSON'
+{
+  "jobs": [
+    {
+      "name": "build-v8 (linux, arm64)",
+      "status": "queued",
+      "conclusion": "",
+      "url": "https://github.example/jobs/5"
+    }
+  ]
+}
+JSON
+  exit 0
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "codex/v8-auto-fix-chromium-lkgr-existing-33333" ]; then
+  echo 'https://github.example/pull/99'
+  exit 0
+fi
+
 echo "unexpected gh invocation: $*" >&2
 exit 2
 SH
@@ -91,5 +112,17 @@ FAILED_DISPLAY_TITLE="chromium-lkgr-cancelled" \
   bash "$REPO_ROOT/.github/scripts/report-build-failure.sh"
 
 test ! -e "$TMP/cancelled-reports/chromium-lkgr-cancelled-22222.md"
+
+REPORT_DIR="$TMP/existing-pr-reports" \
+DRY_RUN=0 \
+GH_CMD="$FAKE_GH" \
+RELEASE_REPO="danielraffel/v8-builder" \
+FAILED_RUN_ID="33333" \
+FAILED_RUN_NAME="Build V8" \
+FAILED_RUN_CONCLUSION="stale_queued" \
+FAILED_DISPLAY_TITLE="chromium-lkgr-existing" \
+  bash "$REPO_ROOT/.github/scripts/report-build-failure.sh"
+
+test -f "$TMP/existing-pr-reports/chromium-lkgr-existing-33333.md"
 
 echo "report-build-failure dry-run test passed"

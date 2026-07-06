@@ -145,6 +145,12 @@ if [ "$DRY_RUN" = "1" ] || [ "$DRY_RUN" = "true" ]; then
   exit 0
 fi
 
+EXISTING_PR_URL="$("$GH_CMD" pr view "$BRANCH" --repo "$RELEASE_REPO" --json url --jq .url 2>/dev/null || true)"
+if [ -n "$EXISTING_PR_URL" ]; then
+  echo "Failure handoff PR already exists: ${EXISTING_PR_URL}"
+  exit 0
+fi
+
 "$GH_CMD" label create "$LABEL" --repo "$RELEASE_REPO" \
   --description "Automated V8 update build failure" \
   --color B60205 >/dev/null 2>&1 || \
