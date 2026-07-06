@@ -184,7 +184,24 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             Linux)   sudo apt-get update -qq && sudo apt-get install -y -qq ccache ;;
-            macOS)   brew list ccache >/dev/null 2>&1 || brew install ccache ;;
+            macOS)
+              if command -v ccache >/dev/null 2>&1; then
+                echo "ccache already available at $(command -v ccache)"
+              else
+                for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+                  if [ -x "$brew_bin" ]; then
+                    eval "$("$brew_bin" shellenv)"
+                    break
+                  fi
+                done
+                if command -v brew >/dev/null 2>&1; then
+                  brew list ccache >/dev/null 2>&1 || brew install ccache || \
+                    echo "::warning::could not install ccache with Homebrew; continuing without ccache"
+                else
+                  echo "::notice::Homebrew not found on macOS runner; continuing without ccache"
+                fi
+              fi
+              ;;
             Windows) choco install ccache -y --no-progress ;;
           esac
           # 4G holds a full V8 build's objects (ccache compresses ~2:1). GitHub's repo

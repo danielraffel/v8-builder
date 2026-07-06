@@ -20,6 +20,7 @@ require_env FAILED_RUN_ID
 
 FAILED_RUN_URL="${FAILED_RUN_URL:-https://github.com/${RELEASE_REPO}/actions/runs/${FAILED_RUN_ID}}"
 FAILED_RUN_NAME="${FAILED_RUN_NAME:-Build V8}"
+FAILED_RUN_CONCLUSION="${FAILED_RUN_CONCLUSION:-failure}"
 FAILED_DISPLAY_TITLE="${FAILED_DISPLAY_TITLE:-}"
 FAILED_HEAD_BRANCH="${FAILED_HEAD_BRANCH:-main}"
 FAILED_HEAD_SHA="${FAILED_HEAD_SHA:-unknown}"
@@ -82,6 +83,25 @@ if not bad:
     print("- No job details returned by GitHub CLI.")
 PY
 )"
+FAILED_JOB_COUNT="$(JOBS_JSON="$JOBS_JSON" python3 - <<'PY'
+import json
+import os
+
+jobs = json.loads(os.environ["JOBS_JSON"]).get("jobs") or []
+bad = [j for j in jobs if (j.get("conclusion") or "").lower() in {
+    "failure",
+    "timed_out",
+    "startup_failure",
+    "action_required",
+}]
+print(len(bad))
+PY
+)"
+
+if [ "$FAILED_RUN_CONCLUSION" = "cancelled" ] && [ "$FAILED_JOB_COUNT" = "0" ]; then
+  echo "Cancelled run ${FAILED_RUN_ID} has no failed jobs; skipping Codex handoff."
+  exit 0
+fi
 
 CODEX_PROMPT="@codex fix the CI failures for ${TARGET_ID}.
 
@@ -94,6 +114,7 @@ cat > "$REPORT_FILE" <<EOF
 - Repository: \`${RELEASE_REPO}\`
 - Failed run: [${FAILED_RUN_ID}](${FAILED_RUN_URL})
 - Workflow: \`${FAILED_RUN_NAME}\`
+- Run conclusion: \`${FAILED_RUN_CONCLUSION}\`
 - Display title: \`${FAILED_DISPLAY_TITLE:-<none>}\`
 - Branch: \`${FAILED_HEAD_BRANCH}\`
 - Head SHA: \`${FAILED_HEAD_SHA}\`
