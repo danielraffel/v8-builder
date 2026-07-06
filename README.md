@@ -135,6 +135,13 @@ repo cares about:
 - `v8` — the exact V8 git SHA this repo builds.
 - `dawn` — the Dawn revision Chromium paired with the Skia/V8 set.
 
+If the dispatched all-platform build fails on `main`, a watchdog workflow opens an
+`auto-update-failed` issue, commits a diagnostic report under `.github/codex-failures/`,
+opens a PR from a `codex/v8-auto-fix-*` branch, and comments a constrained `@codex`
+handoff. The handoff is repair-only: Codex should inspect the failed jobs, push the
+smallest repo fix to that PR branch, and leave release publication to a later green
+`build-v8.yml` run.
+
 Manual runs still allow non-pair/custom builds. From the Actions tab, set `v8_version` to
 build an exact V8 tag, or `v8_revision` to build an arbitrary V8 SHA. Leave
 `lkgr_lock_b64` empty for a manual/non-pair manifest, or provide an LKGR lock to embed a
