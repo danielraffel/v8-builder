@@ -9,7 +9,15 @@ on:
   workflow_dispatch:
     inputs:
       v8_version:
-        description: 'V8 milestone or exact tag (default: build the synced tip)'
+        description: 'V8 exact tag/version for manual builds (omit when v8_revision is set)'
+        required: false
+        type: string
+      v8_revision:
+        description: 'Exact V8 git SHA for LKGR/manual-SHA builds'
+        required: false
+        type: string
+      lkgr_lock_b64:
+        description: 'Optional base64-encoded lkgr-lock.json to embed in manifests'
         required: false
         type: string
       platforms:
@@ -33,7 +41,7 @@ on:
         type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_version }}-${{ inputs.platforms }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ inputs.platforms }}
   cancel-in-progress: false
 permissions:
   contents: write
@@ -183,24 +191,55 @@ jobs:
           # don't agree on (→ "Cache not found", nothing cached). `pwd -W` gives the
           # native D:/a/... form, which matches actions/cache's ${{ github.workspace }}.
           if [ "$RUNNER_OS" = "Windows" ]; then CDIR="$(pwd -W)/.ccache"; else CDIR="$(pwd)/.ccache"; fi
-          echo "CCACHE_DIR=$CDIR" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=4G" >> "$GITHUB_ENV"
-          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
-          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
+          {
+            echo "CCACHE_DIR=$CDIR"
+            echo "CCACHE_MAXSIZE=4G"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime"
+          } >> "$GITHUB_ENV"
       - name: Restore ccache (compiled objects — re-runs recompile only changed TUs)
         if: steps.sel.outputs.go == 'true'
         uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_version }}-${{ github.run_id }}
+          key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_version }}-
+            ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-
             ccache-${{ matrix.platform }}-${{ matrix.arch }}-
+      - name: Decode LKGR lock
+        if: steps.sel.outputs.go == 'true' && inputs.lkgr_lock_b64 != ''
+        shell: bash
+        env:
+          LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          printf '%s' "$LKGR_LOCK_B64" | base64 -d > build/lkgr-lock.json
+          python3 -m json.tool build/lkgr-lock.json
       - name: Build + seal V8 (depot_tools/gn/ninja + export-table seal)
         if: steps.sel.outputs.go == 'true'
         shell: bash
+        env:
+          V8_VERSION: ${{ inputs.v8_version }}
+          V8_REVISION: ${{ inputs.v8_revision }}
+          SKIA_RELEASE_TAG: ${{ inputs.skia_release_tag }}
         run: |
-          python3 build-v8.py ${{ matrix.build }} ${{ inputs.v8_version && format('-tag {0}', inputs.v8_version) || '--use-synced' }}
+          set -euo pipefail
+          extra=()
+          if [ -n "$V8_REVISION" ]; then
+            extra+=(-revision "$V8_REVISION")
+          elif [ -n "$V8_VERSION" ]; then
+            extra+=(-tag "$V8_VERSION")
+          else
+            extra+=(--use-synced)
+          fi
+          if [ -f build/lkgr-lock.json ]; then
+            extra+=(--lkgr-lock build/lkgr-lock.json)
+          fi
+          if [ -n "$SKIA_RELEASE_TAG" ]; then
+            extra+=(--skia-release-tag "$SKIA_RELEASE_TAG")
+          fi
+          python3 build-v8.py ${{ matrix.build }} "${extra[@]}"
           ccache --show-stats 2>/dev/null || true
       - name: Download matching Skia release (coexistence target)
         # mac/linux only. Windows self-validates identity via the gn target; Android has NO
@@ -292,12 +331,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ver="${{ inputs.v8_version }}"
-          if [ -z "$ver" ]; then
-            ver="$(python3 -c "import json,glob;print(json.load(open(sorted(glob.glob('artifacts/**/manifest.json',recursive=True))[0]))['v8_version'])")"
-          fi
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
           mkdir -p release
+          python3 - > release/meta.json <<'PY'
+          import glob, json, re
+          first = json.load(open(sorted(glob.glob('artifacts/**/manifest.json', recursive=True))[0]))
+          version = first.get("v8_version") or "unknown"
+          pair = first.get("pair") or {}
+          def clean(s):
+              return re.sub(r"[^0-9A-Za-z._-]+", "-", s).strip("-")
+          if pair.get("pair_kind") == "chromium-lkgr" and pair.get("v8"):
+              release_id = clean(f"{version}-lkgr-{pair['v8'][:12]}")
+              title = f"V8 {version} (Chromium LKGR {pair['v8'][:12]})"
+          else:
+              release_id = clean("${{ inputs.v8_version }}" or version)
+              title = f"V8 {version}"
+          print(json.dumps({
+              "release_id": release_id,
+              "display_version": version,
+              "title": title,
+              "pair": pair,
+          }, indent=2))
+          PY
+          release_id="$(python3 -c "import json;print(json.load(open('release/meta.json'))['release_id'])")"
+          display_version="$(python3 -c "import json;print(json.load(open('release/meta.json'))['display_version'])")"
+          title="$(python3 -c "import json;print(json.load(open('release/meta.json'))['title'])")"
+          echo "ver=$release_id" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
           for d in artifacts/v8-*; do
             [ -d "$d" ] || continue
             name="$(basename "$d")"                 # v8-<platform>-<arch>
@@ -307,21 +366,31 @@ jobs:
             # release consumer never needs it, and it duplicates the shipped lib. Exclude
             # it (and any stray macOS metadata) from the release zip so each artifact
             # contains ONLY the lean, required entries.
-            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${ver}.zip" . \
+            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${release_id}.zip" . \
                 -x 'validate/*' -x '*/.DS_Store' -x '__MACOSX/*' )
           done
-          python3 - "$ver" > release/RELEASE_NOTES.md <<'PY'
+          python3 - "$display_version" release/meta.json > release/RELEASE_NOTES.md <<'PY'
           import json, glob, sys
           ver = sys.argv[1]
+          meta = json.load(open(sys.argv[2]))
+          pair0 = meta.get("pair") or {}
           ms = sorted(glob.glob('artifacts/**/manifest.json', recursive=True))
           print(f"**V8 {ver}** — a sealed, embeddable, shared V8 that coexists with "
                 f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
                 f"`Intl` on. See the README for the ABI/consumer contract.\n")
-          print("| platform | arch | v8 | sealed | Skia pair (validated against) |")
-          print("|---|---|---|---|---|")
+          if pair0.get("pair_kind") == "chromium-lkgr":
+              print("Chromium LKGR tuple:")
+              print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
+              print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")
+              print(f"- Skia: `{pair0.get('skia', 'unknown')}`")
+              print(f"- V8: `{pair0.get('v8', 'unknown')}`")
+              print(f"- Dawn: `{pair0.get('dawn', 'unknown')}`\n")
+          print("| platform | arch | v8 | sealed | source | validation Skia |")
+          print("|---|---|---|---|---|---|")
           for m in ms:
               d = json.load(open(m)); p = d.get("pair", {}) or {}
-              skia = p.get("skia") or p.get("skia_release") or "—"
+              skia = p.get("validated_skia_release") or p.get("skia_release") or "—"
+              source = p.get("pair_kind") or p.get("source") or "manual"
               plat = d.get('platform')
               # iOS carries an env axis (device|simulator) and validates via the macho seal
               # audit + Simulator ODR gate, not the Skia cmake harness — surface both.
@@ -329,7 +398,7 @@ jobs:
                   plat = f"ios ({d.get('ios_environment', '?')})"
                   skia = 'seal+ODR gate'
               print(f"| {plat} | {d.get('arch')} | {d.get('v8_version')} | "
-                    f"{'yes' if d.get('sealed') else 'NO'} | {skia} |")
+                    f"{'yes' if d.get('sealed') else 'NO'} | {source} | {skia} |")
           print("\nEvery artifact in this release names the same V8 revision "
                 "(single-SHA gate). Each is build + seal-audited (0 ICU/zlib/Abseil "
                 "exports) + identity-checked (no skip-pass).")
@@ -348,7 +417,7 @@ jobs:
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \
-              --title "V8 ${ver}" \
+              --title "${{ steps.pkg.outputs.title }}" \
               --notes-file release/RELEASE_NOTES.md \
               release/*.zip
           fi

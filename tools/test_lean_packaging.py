@@ -42,6 +42,9 @@ def _make_builder(platform, **extra):
     args = types.SimpleNamespace(
         platform=platform,
         v8_version=None,
+        v8_revision=None,
+        lkgr_lock=None,
+        skia_release_tag=None,
         ndk_api_level=None,
         no_seal=False,
         ios_env="device",
@@ -165,6 +168,61 @@ def test_strip_seal_gate_decision():
                                                   #   exports to the real public surface (the
                                                   #   actual ELF case: linux ≈ mac's ~66k)
     assert count_gate_ok(68012, 68013) is False   # rose → strip can't add symbols → corruption
+
+
+def test_built_v8_version_header_matches_v8_string_rules(tmp_path=None):
+    """The Python fallback must mirror include/v8-version-string.h exactly enough for
+    the identity validator: omit .0 patch levels and append ' (candidate)' when set."""
+    tmp = tmp_path or _tmp("version")
+    orig_v8_dir = BV8.V8_DIR
+    BV8.V8_DIR = tmp / "v8"
+    inc = BV8.V8_DIR / "include"
+    inc.mkdir(parents=True)
+    try:
+        header = inc / "v8-version.h"
+        header.write_text(
+            "#define V8_MAJOR_VERSION 15\n"
+            "#define V8_MINOR_VERSION 2\n"
+            "#define V8_BUILD_NUMBER 11\n"
+            "#define V8_PATCH_LEVEL 0\n"
+            "#define V8_IS_CANDIDATE_VERSION 0\n")
+        assert _make_builder("mac")._built_v8_version_header() == "15.2.11"
+
+        header.write_text(
+            "#define V8_MAJOR_VERSION 15\n"
+            "#define V8_MINOR_VERSION 2\n"
+            "#define V8_BUILD_NUMBER 11\n"
+            "#define V8_PATCH_LEVEL 3\n"
+            "#define V8_IS_CANDIDATE_VERSION 1\n")
+        assert _make_builder("mac")._built_v8_version_header() == "15.2.11.3 (candidate)"
+    finally:
+        BV8.V8_DIR = orig_v8_dir
+
+
+def test_lkgr_contract_embeds_lock_and_checks_built_sha(tmp_path=None):
+    tmp = tmp_path or _tmp("lkgr")
+    lock = tmp / "lkgr-lock.json"
+    lock.write_text(
+        '{"source":"chromium-lkgr-deps","chromium_revision":"chromium",'
+        '"chromium_deps_blob":"deps","skia":"skia","v8":"built",'
+        '"dawn":"dawn"}')
+
+    b = _make_builder("mac", lkgr_lock=str(lock), skia_release_tag="chrome/m150")
+    b._built_v8_sha = lambda: "built"
+    c = b._lkgr_contract()
+    assert c["pair_kind"] == "chromium-lkgr"
+    assert c["v8"] == "built"
+    assert c["skia"] == "skia"
+    assert c["dawn"] == "dawn"
+    assert c["validated_skia_release"] == "chrome/m150"
+
+    b._built_v8_sha = lambda: "different"
+    raised = False
+    try:
+        b._lkgr_contract()
+    except SystemExit:
+        raised = True
+    assert raised, "LKGR lock v8 SHA must match the actual built revision"
 
 
 # --- standalone fallback harness ------------------------------------------------

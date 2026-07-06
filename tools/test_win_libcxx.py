@@ -46,6 +46,9 @@ def _make_builder(platform, **extra):
     args = types.SimpleNamespace(
         platform=platform,
         v8_version=None,
+        v8_revision=None,
+        lkgr_lock=None,
+        skia_release_tag=None,
         ndk_api_level=None,
         no_seal=False,
         ios_env="device",

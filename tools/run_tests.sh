@@ -25,6 +25,7 @@ TESTS=(
   seal/test_elf_audit.py
   seal/test_coff_audit.py
   tools/test_check_single_sha.py
+  tools/test_lkgr_decision.py
   tools/test_lean_packaging.py
 )
 

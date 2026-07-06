@@ -9,7 +9,7 @@ duplicate Abseil between V8 and Dawn aborts the process unless one side's copy i
 not exported). See planning/v8-builder-proposal.md.
 
 Pipeline (macOS arm64 first — cheapest to debug the seal):
-  setup_depot_tools -> sync_v8(tag) -> gn gen + ninja v8_monolith (static)
+  setup_depot_tools -> sync_v8(tag or revision) -> gn gen + ninja v8_monolith (static)
   -> seal/<platform>.py wraps it into a sealed shared lib -> package + manifest.
 
 Copyright (c) 2026 Daniel Raffel. MIT. Structure inspired by skia-builder (Oli Larkin).
@@ -469,7 +469,10 @@ def run(cmd, cwd=None, env=None):
 class V8Build:
     def __init__(self, args):
         self.args = args
-        self.tag = args.v8_version or DEFAULT_V8_TAG
+        if args.v8_version and args.v8_revision:
+            raise SystemExit("choose either -tag or -revision, not both")
+        self.revision = args.v8_revision
+        self.tag = args.v8_version or (None if self.revision else DEFAULT_V8_TAG)
         self.env = dict(os.environ)
         self.env["PATH"] = f"{DEPOT_TOOLS_PATH}{os.pathsep}{self.env.get('PATH','')}"
         self.env["DEPOT_TOOLS_UPDATE"] = "1"
@@ -518,14 +521,21 @@ class V8Build:
         say("enabled checkout_android in .gclient (custom_vars + target_os)")
 
     def sync_v8(self):
-        # Pin to the exact tag, then sync deps for that revision.
-        run(["git", "fetch", "--tags", "--depth", "1", "origin", f"refs/tags/{self.tag}"],
-            cwd=V8_DIR, env=self.env)
-        run(["git", "checkout", f"refs/tags/{self.tag}"], cwd=V8_DIR, env=self.env)
+        # Pin to either an exact tag or an exact git SHA, then sync deps for that revision.
+        if self.revision:
+            run(["git", "fetch", "--depth", "1", "origin", self.revision],
+                cwd=V8_DIR, env=self.env)
+            run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=V8_DIR, env=self.env)
+            gclient_revision = self.revision
+        else:
+            run(["git", "fetch", "--tags", "--depth", "1", "origin", f"refs/tags/{self.tag}"],
+                cwd=V8_DIR, env=self.env)
+            run(["git", "checkout", f"refs/tags/{self.tag}"], cwd=V8_DIR, env=self.env)
+            gclient_revision = f"refs/tags/{self.tag}"
         if self.args.platform == "android":
             self._enable_android_checkout()
         run(["gclient", "sync", "-D", "--force", "--reset",
-             f"--revision=src/v8@refs/tags/{self.tag}"], cwd=SRC_DIR, env=self.env)
+             f"--revision=src/v8@{gclient_revision}"], cwd=SRC_DIR, env=self.env)
 
     # The seal is an IN-TREE gn shared_library target (proven on macOS, P1c): it deps
     # :v8_monolith and lets gn compute V8 15.1's full Rust-Temporal + system link
@@ -975,23 +985,77 @@ class V8Build:
                 return tag
         except Exception:
             pass
-        return self.tag
+        header_version = self._built_v8_version_header()
+        if header_version:
+            return header_version
+        return self.tag or (self.revision[:12] if self.revision else DEFAULT_V8_TAG)
+
+    def _built_v8_version_header(self):
+        header = V8_DIR / "include" / "v8-version.h"
+        if not header.exists():
+            return None
+        text = header.read_text(encoding="utf-8", errors="replace")
+        vals = {}
+        macros = {
+            "MAJOR": "V8_MAJOR_VERSION",
+            "MINOR": "V8_MINOR_VERSION",
+            "BUILD": "V8_BUILD_NUMBER",
+            "PATCH": "V8_PATCH_LEVEL",
+            "CANDIDATE": "V8_IS_CANDIDATE_VERSION",
+        }
+        for name, macro in macros.items():
+            m = re.search(rf"#define\s+{macro}\s+(\d+)", text)
+            if not m:
+                return None
+            vals[name] = int(m.group(1))
+        version = f"{vals['MAJOR']}.{vals['MINOR']}.{vals['BUILD']}"
+        if vals["PATCH"] > 0:
+            version += f".{vals['PATCH']}"
+        if vals["CANDIDATE"]:
+            version += " (candidate)"
+        return version
 
     def _lkgr_contract(self):
-        # FR1 shared release-manifest contract: skia-builder AND v8-builder emit the SAME
-        # fields naming the co-tested LKGR triple, so Pulp pairs the two releases by
-        # matching skia/v8/dawn SHAs — a machine-checkable guarantee, not a naming
-        # convention. We build V8 by TAG; `built_revision` is the SHA we actually built
-        # (== the LKGR v8 SHA when the tag resolves to it). See planning/feature-requests.md FR1.
-        lock = BASE_DIR / "planning" / "lkgr-lock.json"
-        c = {"source": "chromium-lkgr-deps", "this_artifact": "v8",
-             "built_revision": self._built_v8_sha()}
-        if lock.exists():
-            d = json.loads(lock.read_text())
-            for k in ("source", "skia", "v8", "dawn", "chromium_deps_blob"):
+        # FR1 shared release-manifest contract: skia-builder AND v8-builder can emit the
+        # SAME fields naming the co-tested LKGR triple, so Pulp pairs releases by matching
+        # skia/v8/dawn SHAs. Manual/non-pair builds still record their exact V8 revision
+        # without pretending to be an LKGR tuple.
+        built = self._built_v8_sha()
+        c = {
+            "source": "manual",
+            "pair_kind": "manual",
+            "this_artifact": "v8",
+            "built_revision": built,
+            "v8": built,
+        }
+        if getattr(self.args, "skia_release_tag", None):
+            c["validated_skia_release"] = self.args.skia_release_tag
+        lock_arg = getattr(self.args, "lkgr_lock", None)
+        lock = Path(lock_arg) if lock_arg else None
+        if lock and lock.exists():
+            d = json.loads(lock.read_text(encoding="utf-8"))
+            c = {
+                "source": d.get("source", "chromium-lkgr-deps"),
+                "pair_kind": "chromium-lkgr",
+                "this_artifact": "v8",
+                "built_revision": built,
+            }
+            for k in (
+                "chromium_revision",
+                "chromium_deps_blob",
+                "chromium_lkgr_time",
+                "skia",
+                "v8",
+                "dawn",
+                "repos",
+            ):
                 if k in d:
                     c[k] = d[k]
-            c["source"] = d.get("source", c["source"])
+            if c.get("v8") and built and c["v8"] != built:
+                raise SystemExit(
+                    f"LKGR lock v8 SHA {c['v8']} does not match built V8 SHA {built}")
+            if getattr(self.args, "skia_release_tag", None):
+                c["validated_skia_release"] = self.args.skia_release_tag
         return c
 
     # Copy V8 public headers into `dst`, filtering out non-header repo metadata. Only
@@ -1145,7 +1209,7 @@ class V8Build:
               # for Windows). Without it the consumer compiles compression-OFF and
               # V8::Initialize aborts with an "embedder-vs-V8 mismatch" (CI 26995426061).
               '    configs += [ ":external_config" ]\n'
-              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self.tag}\\"" ]\n'
+              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self._built_v8_version()}\\"" ]\n'
               '  }\n'
               '}\n')
         build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
@@ -1209,7 +1273,7 @@ class V8Build:
               '    include_dirs = [ "include" ]\n'
               '    deps = [ ":v8_sealed_shared" ]\n'
               '    configs += [ ":external_config" ]\n'
-              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self.tag}\\"" ]\n'
+              f'    defines = [ "EXPECTED_V8_VERSION=\\"{self._built_v8_version()}\\"" ]\n'
               '  }\n'
               '}\n')
         build_gn.write_text(text + "\n" + gn + "\n", encoding="utf-8")
@@ -1326,6 +1390,12 @@ def main():
     p.add_argument("-archs", help="Comma-separated archs (e.g. arm64,x86_64 / x64; "
                                    "android: arm64,x64,arm,x86)")
     p.add_argument("-tag", dest="v8_version", help=f"V8 version tag (default {DEFAULT_V8_TAG})")
+    p.add_argument("-revision", dest="v8_revision",
+                   help="Exact V8 git SHA to build (used by Chromium LKGR tuple releases)")
+    p.add_argument("--lkgr-lock",
+                   help="Path to an lkgr-lock.json to embed in the manifest pair contract")
+    p.add_argument("--skia-release-tag",
+                   help="Skia release tag used for coexistence validation (recorded in manifest)")
     p.add_argument("--no-seal", action="store_true", help="Skip sealing (debug only)")
     p.add_argument("--use-synced", action="store_true",
                    help="Build the currently-synced checkout instead of syncing to -tag")

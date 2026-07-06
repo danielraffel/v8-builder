@@ -40,8 +40,9 @@ A shared library (`libv8.dylib` / `libv8.so` / `v8.dll`) that:
   without exposing ICU's symbols.
 - **Is ABI-consumable** — built against the platform C++ runtime where that matters, so a
   normal consumer can link it (see [_Consuming it_](#consuming-it) for the ABI contract).
-- Ships with a **manifest** recording the exact V8 revision and the Skia release it was
-  validated against (see [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)).
+- Ships with a **manifest** recording the exact V8 revision, the Chromium LKGR
+  Skia/V8/Dawn tuple when built in tuple mode, and the Skia release used for validation
+  (see [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)).
 
 ## Status
 
@@ -106,12 +107,13 @@ ios:
 
 The strip keeps the dynamic export table (the seal) byte-for-byte: the packager re-runs
 `seal/<platform>.py audit` after stripping and **aborts the build if the export count
-changes**, so a leaner artifact can never be a less-sealed one. The build-only `validate/`
+increases or any forbidden export leaks**, so a leaner artifact can never be a less-sealed one. The build-only `validate/`
 harness (the android / win-arm64 cross-built identity validators) rides along in the
 *uploaded CI artifact* for the post-build emulator/VM step, but is excluded from the
 released zip — a consumer never needs it. `manifest.json` records the exact V8 revision,
-arch, ABI flags, the relative path to the shipped binary (`lib`), and the Skia release the
-artifact was validated against (the co-validated pair).
+arch, ABI flags, the relative path to the shipped binary (`lib`), the Skia release the
+artifact was validated against, and — for scheduled releases — the Chromium LKGR
+Skia/V8/Dawn tuple the V8 SHA came from.
 
 A multi-platform release is **single-SHA gated**: every artifact must name the same V8
 revision, or the release is rejected — so a downloaded set is never mixed-revision.
@@ -119,13 +121,27 @@ revision, or the release is rejected — so a downloaded set is never mixed-revi
 ## Automatic releases
 
 A scheduled workflow ([`release-watch.yml`](.github/workflows/release-watch.yml)) polls
-upstream V8 tags weekly and, when a version newer than the last published release appears,
-dispatches the full all-platform sweep (build → seal → single-SHA gate) for that version and
-opens a tracking issue. It's **build-and-hold by default** (you review the run, then publish);
-set the repo variable `V8_WATCH_AUTOPUBLISH=true` to publish automatically. You can also run it
-on demand from the Actions tab, optionally forcing a specific version. Because coexistence is
-ABI + seal rather than version-matching (see below), a V8 bump reuses the current Skia pin
-(`V8_WATCH_SKIA_TAG`) unchanged.
+Chromium LKGR weekly, extracts the **Skia/V8/Dawn tuple** from Chromium's `DEPS`, compares
+that tuple to the latest published release manifest, and dispatches the full all-platform
+sweep only when one of those three SHAs changed. Scheduled tuple changes **publish
+automatically** (`skip_release=false`): build → seal → identity/coexistence validation →
+single-SHA gate → GitHub Release.
+
+Chromium LKGR itself can advance many times per day for unrelated dependencies, so the
+watcher does **not** publish on every LKGR commit. It keys only on the tuple members this
+repo cares about:
+
+- `skia` — the Skia revision Chromium paired with this V8.
+- `v8` — the exact V8 git SHA this repo builds.
+- `dawn` — the Dawn revision Chromium paired with the Skia/V8 set.
+
+Manual runs still allow non-pair/custom builds. From the Actions tab, set `v8_version` to
+build an exact V8 tag, or `v8_revision` to build an arbitrary V8 SHA. Leave
+`lkgr_lock_b64` empty for a manual/non-pair manifest, or provide an LKGR lock to embed a
+specific tuple. `force_version` on `release-watch.yml` is a legacy escape hatch for
+dispatching a specific tag outside LKGR mode. The `V8_WATCH_SKIA_TAG` repo variable still
+selects the skia-builder release used by this repo's macOS/Linux coexistence validator;
+full cross-repo LKGR pairing requires skia-builder artifacts that carry the same tuple.
 
 ## Runners — works on a fork with zero setup
 
@@ -255,12 +271,18 @@ each keeps its **own** sealed copy of ICU/zlib/Abseil. So whether they coexist d
 the symbol seal — **not** on the two being the same upstream version. (Empirically, V8
 15.1 coexists fine with Skia from a *different* Chromium milestone.)
 
-Each release therefore records a **validated pair** — the exact V8 build and the exact
-Skia release it was tested against, SHA-pinned in the manifest. That's a *proof of
-coexistence*, not a claim of an upstream-blessed match. A multi-platform release is gated
-so every per-platform artifact names the **same** V8 revision (no mixed-revision
-releases). Building both Skia and V8 from one Chromium DEPS revision would yield a truly
-co-built pair — a possible future option, not what this does today.
+Each scheduled release therefore records two related facts:
+
+- The **Chromium LKGR tuple** — exact Skia, V8, and Dawn SHAs from Chromium `DEPS`. This is
+  the upstream co-tested set and is the release cadence trigger.
+- The **validation target** — the skia-builder release this repo actually links against in
+  the macOS/Linux coexistence harness (`validated_skia_release` in the manifest).
+
+A multi-platform release is gated so every per-platform artifact names the **same** V8
+revision (no mixed-revision releases). When skia-builder also publishes artifacts with the
+same LKGR tuple, consumers can machine-check a true cross-repo pair by matching the
+manifest's `skia`/`v8`/`dawn` fields. Until then, the seal + validation target remain the
+local proof that this V8 artifact coexists with the configured Skia release.
 
 ## Layout
 
@@ -279,7 +301,7 @@ validate/              # coexistence proof: V8 + Skia in one binary
     CMakeLists.txt     #     links packaged headers + sealed libv8.so via the NDK toolchain
     consumer_main.cpp  #     exercises v8::platform's std::unique_ptr surface (the ABI test)
                        #     (must build with a Chromium-style libc++ — the __Cr contract)
-tools/                 # release gates (single-SHA, Skia/V8 pair pinning)
+tools/                 # release gates (single-SHA, LKGR tuple detection, pair pinning)
 .github/workflows/     # per-platform build + seal + validate matrix
 ```
 
@@ -306,11 +328,10 @@ other:
 - **Shared build-system conventions** — a similar build-orchestrator CLI shape, the same
   per-platform artifact naming (`<platform>-<arch>-…-release.zip`), and the same
   gn/arch labels.
-- **A common release-pairing contract** — both emit the same manifest schema, so a
-  project consuming Skia *and* V8 can check it's using a **co-validated pair**: this repo
-  records the exact Skia release each V8 build was validated against (see
-  [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)), and the Skia side of
-  that pair is precisely what skia-builder produces.
+- **A common release-pairing contract** — both can emit the same manifest schema, so a
+  project consuming Skia *and* V8 can check it's using the same Chromium LKGR tuple
+  (`skia`/`v8`/`dawn`). This repo also records the exact Skia release each V8 build was
+  validated against (see [_Coexistence_](#coexistence-is-abi--seal-not-version-matching)).
 
 So if you already build Skia with skia-builder, V8 from here should slot in with the same
 ergonomics — and the coexistence/pairing checks tie the two together. (We hope folks

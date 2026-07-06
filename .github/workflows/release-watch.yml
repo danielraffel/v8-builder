@@ -1,20 +1,17 @@
-# release-watch.yml — auto-trigger a full sealed-V8 sweep when V8 ships a newer version tag.
+# release-watch.yml — publish a new sealed-V8 sweep when Chromium's LKGR tuple changes.
 #
-# WHAT IT DOES: on a schedule (and on demand), it finds the highest V8 version tag upstream,
-# compares it to the highest `v8-<ver>` release this repo has published, and — if upstream is
-# strictly newer — dispatches the normal `build-v8.yml` sweep (all platforms + single-SHA gate)
-# for that version and opens a tracking issue.
+# WHAT IT DOES: on a schedule (and on demand), it reads Chromium LKGR DEPS, extracts the
+# co-tested Skia/V8/Dawn tuple, compares that tuple to the latest published v8-builder
+# release manifest, and dispatches build-v8.yml only when one of those three SHAs changed.
 #
-# AUTO-PUBLISH IS OFF BY DEFAULT (safe): scheduled runs build + validate but DON'T publish
-# (skip_release=true) and open an issue so a human reviews, then re-dispatches build-v8.yml with
-# skip_release=false to publish. To make scheduled runs auto-publish, set the repo VARIABLE
-# `V8_WATCH_AUTOPUBLISH=true`. The Skia pair is fixed (coexistence is ABI+seal, not version-match);
-# bump `V8_WATCH_SKIA_TAG` to change it.
+# SCHEDULED RUNS PUBLISH BY DEFAULT: when a tuple change is detected from the weekly cron,
+# the dispatched build uses skip_release=false. Manual runs still default to "hold" unless
+# mode=publish is selected. Set V8_WATCH_AUTOPUBLISH=true to make manual/default runs publish
+# too, or use force_version to build an exact legacy V8 tag outside LKGR mode.
 #
-# CADENCE: weekly by default (V8 tags many times a day — dev/beta/canary; weekly avoids churn while
-# still catching every meaningful bump since the comparison is to the last *published* version).
-# Note: this repo currently ships a tip/dev V8 (15.1.27) that is AHEAD of the latest tag, so the
-# watcher will stay quiet until upstream tags exceed it — that's correct (it never downgrades).
+# CADENCE: weekly. Chromium LKGR can advance many times per day, including unrelated DEPS
+# rolls. This watcher intentionally ignores unrelated Chromium rolls and samples the latest
+# Skia/V8/Dawn tuple once a week.
 
 name: V8 release watch
 on:
@@ -23,12 +20,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'On a detected new version: publish (build+release) or hold (build, review, then publish)'
+        description: 'Manual detected build: publish immediately or hold for review'
         type: choice
         default: hold
         options: [hold, publish]
       force_version:
-        description: 'Optional: force-dispatch a specific V8 version (skips the newer-than check)'
+        description: 'Optional legacy/manual V8 tag/version build; skips LKGR tuple detection'
         type: string
         required: false
 
@@ -41,7 +38,9 @@ jobs:
   watch:
     runs-on: ubuntu-24.04
     steps:
-      - name: Detect latest V8 tag vs last published release
+      - uses: actions/checkout@v6
+
+      - name: Detect current LKGR tuple vs latest release
         id: chk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,40 +48,104 @@ jobs:
           set -euo pipefail
           FORCE="${{ inputs.force_version }}"
           if [ -n "$FORCE" ]; then
-            echo "latest=$FORCE" >> "$GITHUB_OUTPUT"; echo "newer=yes" >> "$GITHUB_OUTPUT"
-            echo "forced V8 $FORCE"; exit 0
+            {
+              echo "mode=tag"
+              echo "newer=yes"
+              echo "latest=$FORCE"
+            } >> "$GITHUB_OUTPUT"
+            echo "forced legacy V8 tag/version $FORCE"
+            exit 0
           fi
-          # Highest upstream V8 4-part version tag (major.minor.build.patch). Single-line
-          # python on purpose — a multi-line `python3 -c` here breaks the YAML block scalar.
-          LATEST="$(curl -fsSL 'https://chromium.googlesource.com/v8/v8/+refs/tags/?format=JSON' | tail -c +6 | python3 -c 'import json,sys; t=json.load(sys.stdin); v=sorted([k for k in t if k.count(".")==3 and all(p.isdigit() for p in k.split("."))], key=lambda s:[int(x) for x in s.split(".")]); print(v[-1])')"
-          # Highest version this repo has published as a v8-<ver> release.
-          LAST="$(gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '[.[].tagName|select(startswith("v8-"))|ltrimstr("v8-")]|sort_by(split(".")|map(tonumber))|last // ""')"
-          echo "latest upstream tag: $LATEST | last published: ${LAST:-<none>}"
-          NEWER="$(LATEST="$LATEST" LAST="$LAST" python3 -c 'import os; a=[int(x) for x in os.environ["LATEST"].split(".")]; b=([int(x) for x in os.environ["LAST"].split(".")] if os.environ["LAST"] else [0]); n=max(len(a),len(b)); a+=[0]*(n-len(a)); b+=[0]*(n-len(b)); print("yes" if a>b else "no")')"
-          echo "newer=$NEWER" >> "$GITHUB_OUTPUT"
-          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
-          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+
+          python3 tools/lkgr_pin.py > lkgr-lock.json
+          echo "Current Chromium LKGR lock:"
+          python3 -m json.tool lkgr-lock.json
+          {
+            echo "mode=lkgr"
+            echo "lock_b64=$(base64 -w0 lkgr-lock.json)"
+          } >> "$GITHUB_OUTPUT"
+
+          LAST_TAG="$(gh release list --repo "${{ github.repository }}" --limit 50 \
+            --json tagName,publishedAt \
+            --jq 'sort_by(.publishedAt)|last|.tagName // ""')"
+          echo "last=$LAST_TAG" >> "$GITHUB_OUTPUT"
+
+          last_args=()
+          if [ -n "$LAST_TAG" ]; then
+            ASSET="$(gh release view "$LAST_TAG" --repo "${{ github.repository }}" \
+              --json assets --jq '[.assets[].name | select(endswith(".zip"))][0] // ""')"
+            if [ -n "$ASSET" ]; then
+              mkdir -p last-release
+              gh release download "$LAST_TAG" --repo "${{ github.repository }}" \
+                --pattern "$ASSET" -D last-release
+              if unzip -p "last-release/$ASSET" manifest.json > last-manifest.json; then
+                echo "Latest release manifest from $LAST_TAG / $ASSET:"
+                python3 -m json.tool last-manifest.json
+                last_args=(--last-manifest last-manifest.json)
+              else
+                echo "::warning::could not read manifest.json from $LAST_TAG / $ASSET; dispatching conservatively"
+              fi
+            else
+              echo "::warning::latest release $LAST_TAG has no zip assets; dispatching conservatively"
+            fi
+          fi
+
+          python3 tools/lkgr_decision.py \
+            --current lkgr-lock.json \
+            "${last_args[@]}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Dispatch sweep + open tracking issue
         if: steps.chk.outputs.newer == 'yes'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WATCH_MODE: ${{ steps.chk.outputs.mode }}
+          FORCE_VERSION: ${{ steps.chk.outputs.latest }}
+          LKGR_LOCK_B64: ${{ steps.chk.outputs.lock_b64 }}
+          LKGR_V8: ${{ steps.chk.outputs.v8 }}
+          LKGR_SKIA: ${{ steps.chk.outputs.skia }}
+          LKGR_DAWN: ${{ steps.chk.outputs.dawn }}
+          LKGR_CHROMIUM: ${{ steps.chk.outputs.chromium_revision }}
+          LAST_TAG: ${{ steps.chk.outputs.last }}
+          SCHEDULED: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          MANUAL_MODE: ${{ inputs.mode }}
+          AUTOPUBLISH: ${{ vars.V8_WATCH_AUTOPUBLISH }}
         run: |
           set -euo pipefail
-          VER="${{ steps.chk.outputs.latest }}"
-          SKIA="${{ vars.V8_WATCH_SKIA_TAG || 'chrome/m150' }}"
-          # publish if manually requested OR repo var opts in; otherwise build+hold for review.
-          if [ "${{ inputs.mode }}" = "publish" ] || [ "${{ vars.V8_WATCH_AUTOPUBLISH }}" = "true" ]; then
-            SKIP=false; ACTION="build + PUBLISH"
+          SKIA_RELEASE="${{ vars.V8_WATCH_SKIA_TAG || 'chrome/m150' }}"
+          if [ "$SCHEDULED" = "true" ] || [ "$MANUAL_MODE" = "publish" ] || [ "$AUTOPUBLISH" = "true" ]; then
+            SKIP=false
+            ACTION="build + PUBLISH"
           else
-            SKIP=true;  ACTION="build + hold (review, then re-dispatch with skip_release=false to publish)"
+            SKIP=true
+            ACTION="build + hold (review, then re-dispatch build-v8.yml with skip_release=false)"
           fi
-          gh workflow run build-v8.yml --repo "${{ github.repository }}" \
-            -f platforms=all -f v8_version="$VER" -f skia_release_tag="$SKIA" -f skip_release="$SKIP"
-          gh issue create --repo "${{ github.repository }}" \
-            --title "V8 $VER available — auto-sweep dispatched ($ACTION)" \
-            --body "release-watch detected upstream V8 $VER (last published: ${{ steps.chk.outputs.last }}). Dispatched build-v8.yml (all platforms + single-SHA gate) for $VER against Skia $SKIA — mode: $ACTION. Watch it in the Actions tab. If mode is hold, review the run then re-dispatch build-v8.yml with skip_release=false to publish v8-$VER. Runners auto-resolve: self-hosted when configured + online, else GitHub-hosted." || true
 
-      - name: No new version
+          if [ "$WATCH_MODE" = "tag" ]; then
+            gh workflow run build-v8.yml --repo "${{ github.repository }}" \
+              -f platforms=all \
+              -f v8_version="$FORCE_VERSION" \
+              -f skia_release_tag="$SKIA_RELEASE" \
+              -f skip_release="$SKIP"
+            TITLE="V8 $FORCE_VERSION forced — auto-sweep dispatched ($ACTION)"
+            BODY="release-watch was manually forced to V8 $FORCE_VERSION. Dispatched build-v8.yml (all platforms + single-SHA gate) against Skia validation release $SKIA_RELEASE — mode: $ACTION."
+          else
+            gh workflow run build-v8.yml --repo "${{ github.repository }}" \
+              -f platforms=all \
+              -f v8_revision="$LKGR_V8" \
+              -f lkgr_lock_b64="$LKGR_LOCK_B64" \
+              -f skia_release_tag="$SKIA_RELEASE" \
+              -f skip_release="$SKIP"
+            TITLE="Chromium LKGR tuple changed — V8 ${LKGR_V8:0:12} dispatched ($ACTION)"
+            BODY="$(printf '%s\n\nChromium: %s\nSkia: %s\nV8: %s\nDawn: %s' \
+              "release-watch detected a new Chromium LKGR Skia/V8/Dawn tuple (last release: ${LAST_TAG:-<none>}). Dispatched build-v8.yml (all platforms + single-SHA gate) with V8 $LKGR_V8 against Skia validation release $SKIA_RELEASE — mode: $ACTION." \
+              "$LKGR_CHROMIUM" "$LKGR_SKIA" "$LKGR_V8" "$LKGR_DAWN")"
+          fi
+
+          gh issue create --repo "${{ github.repository }}" \
+            --title "$TITLE" \
+            --body "$BODY" || true
+
+      - name: No new tuple
         if: steps.chk.outputs.newer == 'no'
-        run: echo "No newer V8 tag than the last published release. Nothing to do."
+        run: echo "No Skia/V8/Dawn tuple change since the latest release. Nothing to do."
