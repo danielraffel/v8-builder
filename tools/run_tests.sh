@@ -52,6 +52,11 @@ if ! bash .github/scripts/test-report-build-failure.sh; then
 fi
 
 echo "------------------------------------------------------------"
+if ! bash .github/scripts/test-report-stale-build-runs.sh; then
+  fail=1
+fi
+
+echo "------------------------------------------------------------"
 if [ "$fail" -ne 0 ]; then
   echo "RESULT: some Python unit tests FAILED"
   exit 1
