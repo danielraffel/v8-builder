@@ -201,6 +201,9 @@ jobs:
                   echo "::notice::Homebrew not found on macOS runner; continuing without ccache"
                 fi
               fi
+              if command -v ccache >/dev/null 2>&1; then
+                dirname "$(command -v ccache)" >> "$GITHUB_PATH"
+              fi
               ;;
             Windows) choco install ccache -y --no-progress ;;
           esac
