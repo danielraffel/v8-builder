@@ -71,6 +71,27 @@ in the release; the **device-arm64** slice builds with your Apple signing identi
 mobile "—" cells aren't targets: Android is arm64-only (`arm64-v8a`), and the Intel iOS
 simulator is deferred (all-Apple-silicon fleet).
 
+### Minimum OS versions (deployment targets / glibc floor)
+
+The libraries are deliberately built for **low** minimums so a V8-enabled consumer
+inherits the widest possible reach — and so V8 rarely becomes the binding floor when
+combined with other prebuilts (e.g. Skia/Dawn). A consumer's real floor is the
+**highest** minimum among the libraries it links; V8 only raises it if V8 is that
+highest one.
+
+| Platform | Minimum | Set where | Notes |
+|----------|---------|-----------|-------|
+| macOS | **11.0** (Big Sur) | `mac_deployment_target="11.0"` in `build-v8.py` | Matches Pulp/Skia's low end |
+| Linux | **glibc ≤ 2.28** (Rocky/RHEL 8) | built in a Rocky Linux 8 container (`build-v8-rhel8.yml`); asserted by `tools/rhel8/check_glibc_floor.py --max 2.28` | The libnode baseline; loads on any glibc ≥ 2.28 host |
+| iOS | 16.4 | `ios_deployment_target` in `build-v8.py` | Jitless `V8.framework` |
+| Windows | V8 default (Windows 10) | V8's standard toolchain default | No explicit override |
+| Android | NDK minSdk | NDK sysroot | arm64-v8a |
+
+**To change the macOS minimum:** edit `mac_deployment_target` in `build-v8.py`.
+**To change the Linux glibc floor:** build against a different base container / sysroot
+and adjust `check_glibc_floor.py --max`. The floor is *measured* from the `.so`
+(`.gnu.version_r` max `GLIBC_x.y`), not merely declared — see that script.
+
 V8 15.1; Intl on (off on iOS). Pointer compression is **off** on macOS/Linux (for drop-in
 parity with `libnode`-style consumers) and **on** on Windows (V8's supported default there);
 Windows + Android consumers also link a Chromium-style `__Cr` libc++ — a consumer must match,
