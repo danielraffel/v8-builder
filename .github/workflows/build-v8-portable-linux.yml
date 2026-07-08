@@ -1,27 +1,26 @@
-# build-v8-debian11.yml — portable Linux V8 lane (glibc 2.31 floor).
+# build-v8-portable-linux.yml — portable Linux V8 lane (glibc 2.35 floor).
 #
 # The default Linux cell in build-v8.yml builds on ubuntu-24.04 (glibc ~2.39), so the
 # sealed libv8.so requires a too-new glibc. Because linux_gn_args uses use_sysroot=false
 # + use_custom_libcxx=false, the .so inherits the BUILD HOST's glibc floor. Building
-# inside a Debian 11 (bullseye) container lowers that floor to glibc 2.31 — Chromium's
-# own build-sysroot base — so the same .so loads on any glibc >= 2.31 host (Ubuntu 20.04+,
-# Debian 11+, RHEL 9+, Fedora 32+).
+# inside an Ubuntu 22.04 container lowers that floor to glibc 2.35 — so the same .so loads
+# on Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9+, Fedora 36+.
 #
-# Why Debian 11 and not Rocky 8 (glibc 2.28): Chromium's C++20 host tools
-# (third_party/rust-toolchain/bin/bindgen, the Rust allocator FFI generator) need
-# GLIBCXX_3.4.26+. Debian 11's system libstdc++ is GLIBCXX_3.4.28 — it satisfies them with
-# NO gcc-toolset / libstdc++-symlink hackery, and imposes no extra GLIBCXX floor beyond the
-# 2.31 target distros. Rocky 8's 3.4.25 does not, and the gcc-toolset-12 workaround leaks a
-# GLIBCXX_3.4.30 consumer floor. Why not use_sysroot=true: Chromium's stripped bullseye
-# sysroot lacks the C++20 bits V8 needs (build-v8.py linux_gn_args, "C++20 gap").
+# WHY 2.35 and not lower: V8 must build with the PLATFORM libstdc++ (use_custom_libcxx=
+# false), because V8's public C++ API exposes std:: types and Chromium's bundled libc++
+# mangles them under an ABI namespace that makes the .so non-drop-in (build-v8.py
+# linux_gn_args "D2b REVISED", verified on a real link). Keeping the platform libstdc++
+# then requires a C++20-complete one (std::bit_cast, <source_location>), i.e. gcc-11+.
+# The oldest widely-used base with a C++20 libstdc++ is Ubuntu 22.04 / RHEL 9 (glibc
+# ~2.34-2.35). Older bases fail: Debian 11 gcc-10 has no C++20; Rocky 8 gcc-toolset trips
+# Chromium's bindgen (GLIBCXX) and would leak a 3.4.30 consumer floor anyway.
 #
-# WHERE IT RUNS: a native x86_64 ubuntu-24.04 GitHub runner executes the debian:11
+# WHERE IT RUNS: a native x86_64 ubuntu-24.04 GitHub runner executes the ubuntu:22.04
 # container. V8's bundled clang is x86_64-Linux-host-only, so x64 is native (no emulation).
-# The acceptance gate (objdump -T floor <= 2.31) + the seal audit (0 ICU/zlib/Abseil leaks)
+# The acceptance gate (objdump -T floor <= 2.35) + the seal audit (0 ICU/zlib/Abseil leaks)
 # run inside the same container. With publish_tag set, the sealed build is packaged in the
-# same layout as create-release (build/linux-x64, minus validate/) and uploaded to that
-# release tag.
-name: Build V8 (Debian 11 / glibc 2.31 portable Linux)
+# same layout as create-release (build/linux-x64, minus validate/) and uploaded to that tag.
+name: Build V8 (Ubuntu 22.04 / glibc 2.35 portable Linux)
 on:
   workflow_dispatch:
     inputs:
@@ -30,9 +29,9 @@ on:
         required: false
         type: string
       max_glibc:
-        description: 'Maximum acceptable glibc floor (Debian 11 = 2.31)'
+        description: 'Maximum acceptable glibc floor (Ubuntu 22.04 = 2.35)'
         required: false
-        default: '2.31'
+        default: '2.35'
         type: string
       skia_release_tag:
         description: 'skia-builder release tag for the coexistence identity check (blank = latest linux/x64 asset)'
@@ -50,60 +49,56 @@ permissions:
   contents: write
 
 jobs:
-  debian11-linux-x64:
+  portable-linux-x64:
     runs-on: ubuntu-24.04
     container:
-      image: debian:11
-    # Debian's /bin/sh is dash (no `set -o pipefail`); use plain bash (NOT the `bash`
-    # shorthand, which adds `-eo pipefail` and makes `... | head` SIGPIPE-fail the step).
-    # Steps that need strictness set their own `set -euo pipefail`.
+      image: ubuntu:22.04
+    # Force plain bash (NOT the `bash` shorthand, which adds `-eo pipefail` and makes
+    # `... | head` SIGPIPE-fail the step). Steps that need strictness set `set -euo pipefail`.
     defaults:
       run:
         shell: "bash {0}"
     steps:
-      - name: Install Debian 11 build deps
+      - name: Install Ubuntu 22.04 build deps
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           apt-get update
-          # build-essential provides the system C/C++ toolchain V8's BUNDLED clang still
-          # relies on: libstdc++ headers (<memory>, <type_traits>), the GCC runtime (crt
-          # objects, libgcc/libgcc_s, -lstdc++, -latomic link libs). Without it the build
-          # dies at 'memory file not found' / 'cannot open crtbeginS.o'.
+          # build-essential provides the C++20 system toolchain V8's BUNDLED clang relies
+          # on: gcc-11 libstdc++ headers (<bit>, <source_location>), the GCC runtime (crt
+          # objects, libgcc/libgcc_s, -lstdc++, -latomic link libs).
           apt-get install -y --no-install-recommends \
             build-essential \
             git python3 python3-pip \
             curl ca-certificates file xz-utils bzip2 zip unzip tar \
             locales pkg-config binutils libatomic1 libglib2.0-dev \
             ccache cmake
-          # V8/depot_tools build scripts need python3.8+ syntax; Debian 11 ships 3.9.
           ln -sf /usr/bin/python3 /usr/local/bin/python || true
           python3 --version
-          # Prove the host libstdc++ satisfies Chromium's bindgen (needs GLIBCXX_3.4.26+).
           echo "system libstdc++ GLIBCXX:"; strings /usr/lib/x86_64-linux-gnu/libstdc++.so.6 \
             | grep -E '^GLIBCXX_3\.4\.(2[6-9]|3[0-9])' | sort -V | tail -1
-      - name: Report build-host glibc (proves the 2.31 base)
+      - name: Report build-host glibc (proves the 2.35 base)
         run: |
           ldd --version | head -1
       - uses: actions/checkout@v6
       - name: Free disk space
         run: df -h / || true
-      - name: Build + seal V8 in Debian 11 (glibc 2.31)
+      - name: Build + seal V8 in Ubuntu 22.04 (glibc 2.35)
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
           set -euo pipefail
-          # No gcc-toolset / libstdc++ hackery: Debian 11's stock libstdc++ (GLIBCXX_3.4.28)
-          # already satisfies Chromium's bundled bindgen/clang.
+          # Platform libstdc++ (use_custom_libcxx=false, unchanged) — gcc-11 on 22.04 is
+          # C++20-complete, so no bundling and the .so stays drop-in for consumers.
           export PATH="/usr/lib/ccache:$PATH" || true
           if [ -n "${{ inputs.v8_version }}" ]; then
             python3 build-v8.py linux -archs x64 -tag "${{ inputs.v8_version }}"
           else
             python3 build-v8.py linux -archs x64 --use-synced
           fi
-      - name: Acceptance gate — glibc floor <= ${{ inputs.max_glibc || '2.31' }} (objdump -T)
+      - name: Acceptance gate — glibc floor <= ${{ inputs.max_glibc || '2.35' }} (objdump -T)
         run: |
           set -euo pipefail
           LIB=build/linux-x64/lib/libv8.so
@@ -113,7 +108,7 @@ jobs:
           objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
           echo "== structured check =="
           python3 tools/rhel8/check_glibc_floor.py \
-            --lib "$LIB" --max "${{ inputs.max_glibc || '2.31' }}" --json
+            --lib "$LIB" --max "${{ inputs.max_glibc || '2.35' }}" --json
       - name: Re-run seal audit explicitly (0 ICU/zlib/Abseil leaks)
         run: |
           python3 seal/elf.py audit \
@@ -148,12 +143,12 @@ jobs:
             -DEXPECTED_V8_VERSION="$VER"
           cmake --build validate/build
           ./validate/build/v8_skia_validate
-      - name: Upload artifact (linux-debian11/x64)
+      - name: Upload artifact (linux-portable/x64)
         uses: actions/upload-artifact@v7
         with:
-          name: v8-linux-debian11-x64
+          name: v8-linux-portable-x64
           path: build/linux-x64
-      - name: Package + publish sealed zip (glibc 2.31) to release
+      - name: Package + publish sealed zip (glibc 2.35) to release
         if: ${{ inputs.publish_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,14 +156,11 @@ jobs:
           set -euo pipefail
           VER="$(python3 -c "import json;print(json.load(open('build/linux-x64/manifest.json'))['v8_version'])")"
           ZIP="$GITHUB_WORKSPACE/v8-linux-x64-${VER}.zip"
-          # Match create-release's layout: zip the artifact dir contents, minus the
-          # validate/ harness and macOS cruft, so a consumer sees only the lean payload.
           ( cd build/linux-x64 && zip -qr "$ZIP" . -x 'validate/*' -x '*/.DS_Store' -x '__MACOSX/*' )
           echo "floor=$(objdump -T build/linux-x64/lib/libv8.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)"
-          # Create the tag/release if absent, then upload (clobber so a re-run replaces it).
           gh release view "${{ inputs.publish_tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "${{ inputs.publish_tag }}" --repo "$GITHUB_REPOSITORY" \
                  --title "${{ inputs.publish_tag }}" \
-                 --notes "Portable Linux V8 (glibc 2.31 floor, built in Debian 11). x64 sealed libv8.so; arm64 to follow."
+                 --notes "Portable Linux V8 (glibc 2.35 floor, built in Ubuntu 22.04). x64 sealed libv8.so; arm64 to follow."
           gh release upload "${{ inputs.publish_tag }}" "$ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           echo "published $ZIP → ${{ inputs.publish_tag }}"
