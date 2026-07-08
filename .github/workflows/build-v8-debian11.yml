@@ -54,10 +54,12 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: debian:11
-    # Debian's /bin/sh is dash (no `set -o pipefail`); force bash for every step.
+    # Debian's /bin/sh is dash (no `set -o pipefail`); use plain bash (NOT the `bash`
+    # shorthand, which adds `-eo pipefail` and makes `... | head` SIGPIPE-fail the step).
+    # Steps that need strictness set their own `set -euo pipefail`.
     defaults:
       run:
-        shell: bash
+        shell: "bash {0}"
     steps:
       - name: Install Debian 11 build deps
         env:
