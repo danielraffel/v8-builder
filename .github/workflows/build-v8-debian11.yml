@@ -54,6 +54,10 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: debian:11
+    # Debian's /bin/sh is dash (no `set -o pipefail`); force bash for every step.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install Debian 11 build deps
         env:
