@@ -67,7 +67,12 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
+          # build-essential provides the system C/C++ toolchain V8's BUNDLED clang still
+          # relies on: libstdc++ headers (<memory>, <type_traits>), the GCC runtime (crt
+          # objects, libgcc/libgcc_s, -lstdc++, -latomic link libs). Without it the build
+          # dies at 'memory file not found' / 'cannot open crtbeginS.o'.
           apt-get install -y --no-install-recommends \
+            build-essential \
             git python3 python3-pip \
             curl ca-certificates file xz-utils bzip2 zip unzip tar \
             locales pkg-config binutils libatomic1 libglib2.0-dev \
