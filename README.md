@@ -73,30 +73,27 @@ simulator is deferred (all-Apple-silicon fleet).
 
 ### Minimum OS versions (deployment targets / glibc floor)
 
-The libraries are deliberately built for **low** minimums so a V8-enabled consumer
-inherits the widest possible reach — and so V8 rarely becomes the binding floor when
-combined with other prebuilts (e.g. Skia/Dawn). A consumer's real floor is the
-**highest** minimum among the libraries it links; V8 only raises it if V8 is that
-highest one.
+A consumer's real floor is `max(Chromium's floor, its own toolchain)` across everything it
+links; V8 is deliberately built **low** so it rarely becomes the binding one. These builds
+never ship *below* Chromium's floor; Linux lands slightly *above*, noted below.
 
 | Platform | Minimum | Set where | Notes |
 |----------|---------|-----------|-------|
-| macOS | **11.0** (Big Sur) | `mac_deployment_target="11.0"` in `build-v8.py` | Matches Pulp/Skia's low end |
-| Linux | **glibc ≤ 2.28** (Rocky/RHEL 8) | built in a Rocky Linux 8 container (`build-v8-rhel8.yml`); asserted by `tools/rhel8/check_glibc_floor.py --max 2.28` | The libnode baseline; loads on any glibc ≥ 2.28 host |
+| macOS | **11.0** (Big Sur) | `mac_deployment_target="11.0"` in `build-v8.py` | V8 allows 11; a consumer's own libc++ usage (e.g. `std::format` → macOS **13.3**) can raise it |
+| Linux x64 | **glibc 2.34** | `portable-linux-x64` job in `build-v8.yml` (Ubuntu 22.04 container); asserted by `tools/rhel8/check_glibc_floor.py --max 2.34` | *Measured* from the `.so` (`.gnu.version_r` max `GLIBC_x.y`), not merely declared. Loads on Ubuntu 22.04+ / Debian 12+ / RHEL 9+ / Fedora 35+ |
 | iOS | 16.4 | `ios_deployment_target` in `build-v8.py` | Jitless `V8.framework` |
-| Windows | V8 default (Windows 10) | V8's standard toolchain default | No explicit override |
+| Windows | **Windows 10** | V8's standard toolchain default | Chromium default |
 | Android | NDK minSdk | NDK sysroot | arm64-v8a |
 
-**To change the macOS minimum:** edit `mac_deployment_target` in `build-v8.py`.
-**To change the Linux glibc floor:** build against a different base container / sysroot
-and adjust `check_glibc_floor.py --max`. The floor is *measured* from the `.so`
-(`.gnu.version_r` max `GLIBC_x.y`), not merely declared — see that script.
+**Why Linux is 2.34 and not lower:** V8 must build against the **platform** libstdc++
+(`use_custom_libcxx=false`) — its public API exposes `std::` types, so Chromium's bundled
+libc++ (mangled under an ABI namespace) makes the `.so` non-drop-in. Keeping the platform
+libstdc++ then needs a **C++20**-complete one (`std::bit_cast`, `<source_location>`), i.e.
+gcc-11+, whose oldest clean base is Ubuntu 22.04 (glibc ~2.34). Rocky 8 (2.28) trips
+Chromium's bindgen (GLIBCXX); Debian 11 (gcc-10) has no C++20. (The old `build-v8-rhel8.yml`
+lane is gone.) **To change:** rebuild on a different base and adjust `check_glibc_floor.py --max`.
 
-V8 15.1; Intl on (off on iOS). Pointer compression is **off** on macOS/Linux (for drop-in
-parity with `libnode`-style consumers) and **on** on Windows (V8's supported default there);
-Windows + Android consumers also link a Chromium-style `__Cr` libc++ — a consumer must match,
-see below. The Windows artifact **ships that `__Cr` libc++ as `lib/libc++.lib`** so an
-iostream-using consumer (choc's V8 wrapper) doesn't have to build one.
+**To change the macOS minimum:** edit `mac_deployment_target` in `build-v8.py`.
 
 ## What a build produces
 
