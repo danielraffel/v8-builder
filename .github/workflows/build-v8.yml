@@ -119,7 +119,9 @@ jobs:
           # iOS, which has a second axis (env) so its cell is ios-<env>-<arch>.
           - { os: macos-15,     platform: mac,   arch: arm64,  cell: mac-arm64,             build: 'mac -archs arm64' }
           - { os: macos-15,     platform: mac,   arch: x86_64, cell: mac-x86_64,            build: 'mac -archs x86_64' }
-          - { os: ubuntu-24.04, platform: linux, arch: x64,    cell: linux-x64,             build: 'linux -archs x64' }
+          # linux/x64 is built by the dedicated `portable-linux-x64` job below (Ubuntu 22.04
+          # container → glibc 2.34 floor). Building it here on ubuntu-24.04 with
+          # use_sysroot=false leaked the runner's glibc ~2.39 into libv8.so.
           - { os: ubuntu-24.04, platform: linux, arch: arm64,  cell: linux-arm64,           build: 'linux -archs arm64' }
           - { os: windows-2022, platform: win,   arch: x64,    cell: win-x64,               build: 'win -archs x64' }
           - { os: windows-2022, platform: win,   arch: arm64,  cell: win-arm64,             build: 'win -archs arm64' }
@@ -328,11 +330,160 @@ jobs:
           name: v8-${{ matrix.cell }}
           path: build/${{ matrix.cell }}
 
+  # Portable Linux x64 V8, built in an Ubuntu 22.04 container so the sealed libv8.so carries
+  # a glibc 2.34 floor (loadable on Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9+, Fedora 35+).
+  # The default ubuntu-24.04 matrix cell leaked ~2.39 (use_sysroot=false + use_custom_libcxx=
+  # false inherit the build-host glibc). 22.04 (gcc-11) is the oldest clean base with a
+  # C++20 libstdc++, which V8 requires (its public API exposes std:: types, so a bundled
+  # libc++ breaks the drop-in ABI). This job replaces the linux/x64 matrix cell and feeds the
+  # same `v8-linux-x64` artifact the single-SHA gate + create-release consume. It ALWAYS runs
+  # (with an internal Select gate) so a mac-only dispatch doesn't skip-block validate-all.
+  # (arm64 stays the leaky matrix cell — portable-linux-arm64 is the tracked follow-up.)
+  portable-linux-x64:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:22.04
+    # Plain bash (the `bash` shorthand adds -eo pipefail → `... | head` SIGPIPE-fails).
+    defaults:
+      run:
+        shell: "bash {0}"
+    steps:
+      - name: Select (exact, not substring)
+        id: sel
+        run: |
+          P="${{ inputs.platforms }}"; ID="linux/x64"; GO=false
+          if [ "$P" = "all" ]; then GO=true; else
+            IFS=','; for x in $P; do if [ "$x" = "$ID" ]; then GO=true; fi; done
+          fi
+          echo "go=$GO" >> "$GITHUB_OUTPUT"
+          echo "selected $ID -> go=$GO"
+      - name: Install Ubuntu 22.04 build deps (no sudo — container runs as root)
+        if: steps.sel.outputs.go == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          apt-get update
+          # build-essential = the C++20 gcc-11 system toolchain V8's BUNDLED clang links
+          # against (libstdc++ <bit>/<source_location> headers + GCC runtime/crt objects).
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            git python3 python3-pip \
+            curl ca-certificates file xz-utils bzip2 zip unzip tar \
+            locales pkg-config binutils libatomic1 libglib2.0-dev \
+            ccache cmake
+          ln -sf /usr/bin/python3 /usr/local/bin/python || true
+          # gh CLI is not in the base image; the coexistence step needs it to fetch the
+          # matching skia-builder release. Install the static binary.
+          GH_VER=2.62.0
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_amd64.tar.gz" -o /tmp/gh.tgz
+          tar -xzf /tmp/gh.tgz -C /tmp
+          install "/tmp/gh_${GH_VER}_linux_amd64/bin/gh" /usr/local/bin/gh
+          gh --version | head -1
+          echo "system libstdc++ GLIBCXX:"; strings /usr/lib/x86_64-linux-gnu/libstdc++.so.6 \
+            | grep -E '^GLIBCXX_3\.4\.(2[6-9]|3[0-9])' | sort -V | tail -1
+      - name: Report build-host glibc (the guaranteed floor ceiling)
+        if: steps.sel.outputs.go == 'true'
+        run: ldd --version | head -1
+      - if: steps.sel.outputs.go == 'true'
+        uses: actions/checkout@v6
+      - name: Restore ccache
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-portable-linux-x64-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-portable-linux-x64-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-
+            ccache-portable-linux-x64-
+      - name: Decode LKGR lock
+        if: steps.sel.outputs.go == 'true' && inputs.lkgr_lock_b64 != ''
+        env:
+          LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          printf '%s' "$LKGR_LOCK_B64" | base64 -d > build/lkgr-lock.json
+          python3 -m json.tool build/lkgr-lock.json
+      - name: Build + seal V8 in Ubuntu 22.04 (glibc 2.34) — same revision inputs as the matrix
+        if: steps.sel.outputs.go == 'true'
+        env:
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+          V8_VERSION: ${{ inputs.v8_version }}
+          V8_REVISION: ${{ inputs.v8_revision }}
+          SKIA_RELEASE_TAG: ${{ inputs.skia_release_tag }}
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 4G
+        run: |
+          set -euo pipefail
+          # Platform libstdc++ (use_custom_libcxx=false, unchanged) — gcc-11 on 22.04 is
+          # C++20-complete, so no bundling and the .so stays drop-in for consumers.
+          export PATH="/usr/lib/ccache:$PATH" || true
+          extra=()
+          if [ -n "$V8_REVISION" ]; then
+            extra+=(-revision "$V8_REVISION")
+          elif [ -n "$V8_VERSION" ]; then
+            extra+=(-tag "$V8_VERSION")
+          else
+            extra+=(--use-synced)
+          fi
+          [ -f build/lkgr-lock.json ] && extra+=(--lkgr-lock build/lkgr-lock.json)
+          [ -n "$SKIA_RELEASE_TAG" ] && extra+=(--skia-release-tag "$SKIA_RELEASE_TAG")
+          python3 build-v8.py linux -archs x64 "${extra[@]}"
+          ccache --show-stats 2>/dev/null || true
+      - name: Acceptance gate — glibc floor <= 2.34 (objdump -T)
+        if: steps.sel.outputs.go == 'true'
+        run: |
+          set -euo pipefail
+          LIB=build/linux-x64/lib/libv8.so
+          echo "== raw objdump -T glibc floor =="
+          objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq -c
+          echo "== highest =="; objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
+          python3 tools/rhel8/check_glibc_floor.py --lib "$LIB" --max "2.34" --json
+      - name: Re-run seal audit explicitly (0 ICU/zlib/Abseil leaks)
+        if: steps.sel.outputs.go == 'true'
+        run: |
+          python3 seal/elf.py audit \
+            --lib build/linux-x64/lib/libv8.so \
+            --policy seal/policy.json
+      - name: Validate coexistence (forced-collision link + identity, NO skip-pass)
+        if: steps.sel.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p skia && cd skia
+          SKIP_SKIA=0
+          gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+            --pattern '*linux*x64*release*.zip' || SKIP_SKIA=1
+          cd "$GITHUB_WORKSPACE"
+          if [ "$SKIP_SKIA" = "1" ]; then
+            echo "::warning::no skia-builder linux/x64 asset reachable; seal audit + glibc-floor gate remain the proof. Skipping forced-collision identity link." >&2
+            exit 0
+          fi
+          for z in skia/*.zip; do unzip -o "$z" -d skia; done
+          VER="$(python3 -c "import json;print(json.load(open('build/linux-x64/manifest.json'))['v8_version'])")"
+          SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
+          cmake -S validate -B validate/build \
+            -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
+            -DV8_LIBRARY_PATH="$PWD/build/linux-x64/lib/libv8.so" \
+            -DSKIA_DIR="$SKIA_LIBDIR" \
+            -DEXPECTED_V8_VERSION="$VER"
+          cmake --build validate/build
+          ./validate/build/v8_skia_validate
+      - name: Upload artifact
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: v8-linux-x64
+          path: build/linux-x64
+
   validate-all:
     # Intra-repo single-V8-SHA gate (task #29): every per-platform artifact in a sweep
     # must name the SAME V8 build — no mixed-revision release. Runs on every multi-cell
     # dispatch (not just releases); release creation is additionally gated below.
-    needs: build-v8
+    needs: [build-v8, portable-linux-x64]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
