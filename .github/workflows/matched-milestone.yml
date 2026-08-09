@@ -76,7 +76,7 @@ jobs:
               found=true
               break
             fi
-          done < <(gh release list --limit 100 --json tagName \
+          done < <(gh release list --limit 100 --exclude-drafts --exclude-pre-releases --json tagName \
             --jq ".[].tagName | select(startswith(\"v8-m${MILESTONE}-\"))")
           echo "found=$found" >> "$GITHUB_OUTPUT"
       - name: Dispatch sealed all-platform release
