@@ -155,6 +155,10 @@ checks existing release manifests, so repeating a dispatch does not rebuild an a
 published exact match. This lane supplies Pulp's default matched toolchain; the weekly
 LKGR lane remains available to consumers that want a newer V8.
 
+Each matched V8 release links to its exact [Skia/Dawn release](https://github.com/danielraffel/skia-builder/releases),
+and the Skia release links back to the matching V8 milestone. Treat them as one tested
+tuple, but download only the Skia/Dawn assets, V8 assets, or both that your project needs.
+
 Chromium LKGR itself can advance many times per day for unrelated dependencies, so the
 watcher does **not** publish on every LKGR commit. It keys only on the tuple members this
 repo cares about:

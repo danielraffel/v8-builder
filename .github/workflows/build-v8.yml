@@ -558,6 +558,11 @@ jobs:
                 f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
                 f"`Intl` on. See the README for the ABI/consumer contract.\n")
           if pair0.get("pair_kind") == "chromium-milestone":
+              skia_release = pair0.get("skia_release_tag") or pair0.get("validated_skia_release")
+              if skia_release:
+                  print(f"**Matched Skia/Dawn release:** "
+                        f"[{skia_release}](https://github.com/danielraffel/skia-builder/releases/tag/{skia_release})  ")
+                  print("Use either release independently, or both as the matched toolchain.\n")
               print(f"Chromium M{pair0.get('milestone', '?')} branch tuple:")
               print(f"- Chromium branch: `{pair0.get('chromium_branch', 'unknown')}`")
               print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
