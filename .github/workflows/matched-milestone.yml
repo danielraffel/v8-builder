@@ -77,7 +77,7 @@ jobs:
               break
             fi
           done < <(gh release list --limit 100 --json tagName \
-            --jq ".[].tagName | select(startswith(\"m${MILESTONE}-\"))")
+            --jq ".[].tagName | select(startswith(\"v8-m${MILESTONE}-\"))")
           echo "found=$found" >> "$GITHUB_OUTPUT"
       - name: Dispatch sealed all-platform release
         if: steps.existing.outputs.found != 'true'
