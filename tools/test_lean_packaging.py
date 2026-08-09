@@ -252,6 +252,23 @@ def test_lkgr_contract_embeds_lock_and_checks_built_sha(tmp_path=None):
     assert raised, "LKGR lock v8 SHA must match the actual built revision"
 
 
+def test_milestone_contract_preserves_built_dawn_truth(tmp_path=None):
+    tmp = tmp_path or _tmp("milestone")
+    lock = tmp / "milestone-lock.json"
+    lock.write_text(
+        '{"source":"chromium-milestone-branch-deps","pair_kind":"chromium-milestone",'
+        '"milestone":152,"chromium_branch":"7977","skia":"skia","v8":"built",'
+        '"dawn":"chromium-dawn","built_dawn":"skia-dawn","dawn_matches_chromium":false}'
+    )
+    b = _make_builder("mac", lkgr_lock=str(lock), skia_release_tag="chrome/m152")
+    b._built_v8_sha = lambda: "built"
+    c = b._lkgr_contract()
+    assert c["pair_kind"] == "chromium-milestone"
+    assert c["milestone"] == 152
+    assert c["built_dawn"] == "skia-dawn"
+    assert c["dawn_matches_chromium"] is False
+
+
 # --- standalone fallback harness ------------------------------------------------
 
 _TMP_ROOTS = []

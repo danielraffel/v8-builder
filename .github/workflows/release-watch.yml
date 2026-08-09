@@ -116,7 +116,13 @@ jobs:
           AUTOPUBLISH: ${{ vars.V8_WATCH_AUTOPUBLISH }}
         run: |
           set -euo pipefail
-          SKIA_RELEASE="${{ vars.V8_WATCH_SKIA_TAG || 'chrome/m150' }}"
+          SKIA_RELEASE="${{ vars.V8_WATCH_SKIA_TAG }}"
+          if [ -z "$SKIA_RELEASE" ]; then
+            SKIA_RELEASE="$(gh release list --repo danielraffel/skia-builder --limit 50 \
+              --exclude-drafts --exclude-pre-releases --json tagName,publishedAt \
+              --jq 'sort_by(.publishedAt)|last|.tagName')"
+          fi
+          [ -n "$SKIA_RELEASE" ] || { echo "::error::no published skia-builder release found"; exit 1; }
           if [ "$SCHEDULED" = "true" ] || [ "$MANUAL_MODE" = "publish" ] || [ "$AUTOPUBLISH" = "true" ]; then
             SKIP=false
             ACTION="build + PUBLISH"

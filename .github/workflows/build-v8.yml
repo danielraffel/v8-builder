@@ -515,7 +515,10 @@ jobs:
           pair = first.get("pair") or {}
           def clean(s):
               return re.sub(r"[^0-9A-Za-z._-]+", "-", s).strip("-")
-          if pair.get("pair_kind") == "chromium-lkgr" and pair.get("v8"):
+          if pair.get("pair_kind") == "chromium-milestone" and pair.get("v8"):
+              release_id = clean(f"m{pair['milestone']}-{version}-{pair['v8'][:12]}")
+              title = f"M{pair['milestone']} matched V8 {version} ({pair['v8'][:12]})"
+          elif pair.get("pair_kind") == "chromium-lkgr" and pair.get("v8"):
               release_id = clean(f"{version}-lkgr-{pair['v8'][:12]}")
               title = f"V8 {version} (Chromium LKGR {pair['v8'][:12]})"
           else:
@@ -554,7 +557,17 @@ jobs:
           print(f"**V8 {ver}** — a sealed, embeddable, shared V8 that coexists with "
                 f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
                 f"`Intl` on. See the README for the ABI/consumer contract.\n")
-          if pair0.get("pair_kind") == "chromium-lkgr":
+          if pair0.get("pair_kind") == "chromium-milestone":
+              print(f"Chromium M{pair0.get('milestone', '?')} branch tuple:")
+              print(f"- Chromium branch: `{pair0.get('chromium_branch', 'unknown')}`")
+              print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
+              print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")
+              print(f"- Skia: `{pair0.get('skia', 'unknown')}`")
+              print(f"- V8: `{pair0.get('v8', 'unknown')}`")
+              print(f"- Chromium Dawn: `{pair0.get('dawn', 'unknown')}`")
+              print(f"- Skia-built Dawn: `{pair0.get('built_dawn', 'unknown')}`")
+              print(f"- Dawn pins identical: `{pair0.get('dawn_matches_chromium', False)}`\n")
+          elif pair0.get("pair_kind") == "chromium-lkgr":
               print("Chromium LKGR tuple:")
               print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
               print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")

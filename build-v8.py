@@ -1020,8 +1020,8 @@ class V8Build:
 
     def _lkgr_contract(self):
         # FR1 shared release-manifest contract: skia-builder AND v8-builder can emit the
-        # SAME fields naming the co-tested LKGR triple, so Pulp pairs releases by matching
-        # skia/v8/dawn SHAs. Manual/non-pair builds still record their exact V8 revision
+        # SAME fields naming the upstream tuple, so Pulp can pair releases by exact
+        # provenance. Manual/non-pair builds still record their exact V8 revision
         # without pretending to be an LKGR tuple.
         built = self._built_v8_sha()
         c = {
@@ -1039,7 +1039,7 @@ class V8Build:
             d = json.loads(lock.read_text(encoding="utf-8"))
             c = {
                 "source": d.get("source", "chromium-lkgr-deps"),
-                "pair_kind": "chromium-lkgr",
+                "pair_kind": d.get("pair_kind", "chromium-lkgr"),
                 "this_artifact": "v8",
                 "built_revision": built,
             }
@@ -1047,9 +1047,13 @@ class V8Build:
                 "chromium_revision",
                 "chromium_deps_blob",
                 "chromium_lkgr_time",
+                "milestone",
+                "chromium_branch",
                 "skia",
                 "v8",
                 "dawn",
+                "built_dawn",
+                "dawn_matches_chromium",
                 "repos",
             ):
                 if k in d:
