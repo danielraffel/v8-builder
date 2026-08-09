@@ -50,6 +50,13 @@ class MilestonePinTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "does not match published Skia"):
                 mp.milestone_lock(152, expected_skia="9" * 40)
 
+    def test_rejects_supplied_pins_that_disagree_with_skia_release(self):
+        with patch.object(mp, "_skia_release_pins", return_value=("1" * 40, "4" * 40)):
+            with self.assertRaisesRegex(SystemExit, "supplied Skia .* does not match"):
+                mp.milestone_lock(152, expected_skia="9" * 40, skia_release_tag="chrome/m152")
+            with self.assertRaisesRegex(SystemExit, "supplied built Dawn .* does not match"):
+                mp.milestone_lock(152, built_dawn="9" * 40, skia_release_tag="chrome/m152")
+
 
 if __name__ == "__main__":
     unittest.main()

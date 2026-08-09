@@ -65,8 +65,18 @@ def milestone_lock(milestone, expected_skia=None, built_dawn=None, skia_release_
         if skia_release_tag != wanted:
             raise SystemExit(f"milestone_pin: expected Skia release {wanted}, got {skia_release_tag}")
         release_skia, release_dawn = _skia_release_pins(skia_release_tag)
-        expected_skia = expected_skia or release_skia
-        built_dawn = built_dawn or release_dawn
+        if expected_skia and expected_skia != release_skia:
+            raise SystemExit(
+                f"milestone_pin: supplied Skia {expected_skia} does not match "
+                f"{skia_release_tag} Skia {release_skia}"
+            )
+        if built_dawn and built_dawn != release_dawn:
+            raise SystemExit(
+                f"milestone_pin: supplied built Dawn {built_dawn} does not match "
+                f"{skia_release_tag} Dawn {release_dawn}"
+            )
+        expected_skia = release_skia
+        built_dawn = release_dawn
     info = _milestone_info(milestone)
     branch = str(info["chromium_branch"])
     commit_meta = _json_url(f"{GITILES}/+/refs/branch-heads/{branch}?format=JSON")
