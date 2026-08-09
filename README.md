@@ -145,6 +145,16 @@ sweep only when one of those three SHAs changed. Scheduled tuple changes **publi
 automatically** (`skip_release=false`): build → seal → identity/coexistence validation →
 single-SHA gate → GitHub Release.
 
+Milestone-matched releases are a second, independent lane. After skia-builder publishes
+`chrome/mNNN`, it sends a `skia_milestone_published` repository dispatch to
+[`matched-milestone.yml`](.github/workflows/matched-milestone.yml). That workflow resolves
+Chromium's milestone branch, requires its `skia_revision` to equal the published Skia
+branch head, selects the branch's exact V8 SHA, records both Chromium's Dawn pin and the
+Dawn pin Skia actually built, and starts the same sealed all-platform publisher. It first
+checks existing release manifests, so repeating a dispatch does not rebuild an already
+published exact match. This lane supplies Pulp's default matched toolchain; the weekly
+LKGR lane remains available to consumers that want a newer V8.
+
 Chromium LKGR itself can advance many times per day for unrelated dependencies, so the
 watcher does **not** publish on every LKGR commit. It keys only on the tuple members this
 repo cares about:
@@ -164,9 +174,9 @@ Manual runs still allow non-pair/custom builds. From the Actions tab, set `v8_ve
 build an exact V8 tag, or `v8_revision` to build an arbitrary V8 SHA. Leave
 `lkgr_lock_b64` empty for a manual/non-pair manifest, or provide an LKGR lock to embed a
 specific tuple. `force_version` on `release-watch.yml` is a legacy escape hatch for
-dispatching a specific tag outside LKGR mode. The `V8_WATCH_SKIA_TAG` repo variable still
-selects the skia-builder release used by this repo's macOS/Linux coexistence validator;
-full cross-repo LKGR pairing requires skia-builder artifacts that carry the same tuple.
+dispatching a specific tag outside LKGR mode. The `V8_WATCH_SKIA_TAG` repo variable can
+override the skia-builder release used by the weekly lane's macOS/Linux coexistence
+validator; when unset, the watcher selects the latest stable skia-builder release.
 
 ## Runners — works on a fork with zero setup
 
@@ -302,6 +312,10 @@ Each scheduled release therefore records two related facts:
   the upstream co-tested set and is the release cadence trigger.
 - The **validation target** — the skia-builder release this repo actually links against in
   the macOS/Linux coexistence harness (`validated_skia_release` in the manifest).
+
+A milestone lock additionally records `built_dawn`, because Skia follows its own DEPS and
+that Dawn SHA can differ from Chromium's milestone-branch `dawn_revision`. The manifest
+surfaces `dawn_matches_chromium` explicitly rather than overstating the relationship.
 
 A multi-platform release is gated so every per-platform artifact names the **same** V8
 revision (no mixed-revision releases). When skia-builder also publishes artifacts with the

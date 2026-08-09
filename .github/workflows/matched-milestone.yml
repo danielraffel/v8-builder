@@ -1,0 +1,98 @@
+name: Build matched milestone V8
+run-name: M${{ inputs.milestone || github.event.client_payload.milestone }} matched V8
+
+on:
+  workflow_dispatch:
+    inputs:
+      milestone:
+        description: Chromium milestone to resolve (for example 152)
+        required: true
+        type: number
+      skia_release_tag:
+        description: Published skia-builder release to validate against
+        required: true
+        type: string
+      expected_skia:
+        description: Optional exact Skia SHA expected in Chromium branch DEPS
+        required: false
+        type: string
+      built_dawn:
+        description: Optional Dawn SHA actually packaged by skia-builder
+        required: false
+        type: string
+  repository_dispatch:
+    types: [skia_milestone_published]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: matched-milestone-${{ inputs.milestone || github.event.client_payload.milestone }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-and-dispatch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Resolve exact milestone lock
+        id: lock
+        env:
+          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
+          SKIA_RELEASE: ${{ inputs.skia_release_tag || github.event.client_payload.skia_release_tag }}
+          EXPECTED_SKIA: ${{ inputs.expected_skia || github.event.client_payload.skia }}
+          BUILT_DAWN: ${{ inputs.built_dawn || github.event.client_payload.dawn }}
+        run: |
+          set -euo pipefail
+          [[ "$MILESTONE" =~ ^[0-9]+$ ]]
+          [ "$SKIA_RELEASE" = "chrome/m$MILESTONE" ]
+          args=("$MILESTONE" --skia-release-tag "$SKIA_RELEASE")
+          [ -z "$EXPECTED_SKIA" ] || args+=(--expected-skia "$EXPECTED_SKIA")
+          [ -z "$BUILT_DAWN" ] || args+=(--built-dawn "$BUILT_DAWN")
+          python3 tools/milestone_pin.py "${args[@]}" > milestone-lock.json
+          python3 -m json.tool milestone-lock.json
+          echo "v8=$(jq -r .v8 milestone-lock.json)" >> "$GITHUB_OUTPUT"
+          echo "lock_b64=$(base64 -w0 milestone-lock.json)" >> "$GITHUB_OUTPUT"
+      - name: Skip an already-published exact match
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_V8: ${{ steps.lock.outputs.v8 }}
+          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
+        run: |
+          set -euo pipefail
+          found=false
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            asset="$(gh release view "$tag" --json assets --jq '[.assets[].name|select(endswith(".zip"))][0] // ""')"
+            [ -n "$asset" ] || continue
+            rm -rf probe && mkdir probe
+            gh release download "$tag" --pattern "$asset" -D probe
+            if unzip -p "probe/$asset" manifest.json 2>/dev/null | jq -e \
+              --arg v8 "$EXPECTED_V8" --argjson milestone "$MILESTONE" \
+              '.pair.v8 == $v8 and .pair.milestone == $milestone' >/dev/null; then
+              echo "Exact M$MILESTONE V8 tuple already published as $tag"
+              found=true
+              break
+            fi
+          done < <(gh release list --limit 100 --json tagName \
+            --jq ".[].tagName | select(startswith(\"m${MILESTONE}-\"))")
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+      - name: Dispatch sealed all-platform release
+        if: steps.existing.outputs.found != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V8_REVISION: ${{ steps.lock.outputs.v8 }}
+          LOCK_B64: ${{ steps.lock.outputs.lock_b64 }}
+          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
+          SKIA_RELEASE: ${{ inputs.skia_release_tag || github.event.client_payload.skia_release_tag }}
+        run: |
+          gh workflow run build-v8.yml \
+            -f platforms=all \
+            -f release_target_id="chromium-m${MILESTONE}-${V8_REVISION:0:12}" \
+            -f v8_revision="$V8_REVISION" \
+            -f lkgr_lock_b64="$LOCK_B64" \
+            -f skia_release_tag="$SKIA_RELEASE" \
+            -f skip_release=false \
+            -f force_github_runners=true
