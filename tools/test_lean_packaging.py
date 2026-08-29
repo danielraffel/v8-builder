@@ -79,6 +79,58 @@ def test_patch_windows_sdk_version_rejects_missing_or_duplicate_assignment():
                 raise AssertionError("expected SDK assignment count mismatch to fail")
 
 
+def test_pin_windows_ntddi_keeps_a_macro_defined_by_the_selected_sdk():
+    with tempfile.TemporaryDirectory() as tmp:
+        build = Path(tmp) / "BUILD.gn"
+        header = Path(tmp) / "sdkddkver.h"
+        build.write_text('defines = ["NTDDI_VERSION=NTDDI_WIN11_BR"]\n')
+        header.write_text(
+            "#define NTDDI_WIN11_BR 0x0A000010\n"
+            "#define WDK_NTDDI_VERSION NTDDI_WIN11_BR\n")
+        assert BV8.pin_windows_ntddi_to_sdk(build, header) == "NTDDI_WIN11_BR"
+        assert build.read_text() == 'defines = ["NTDDI_VERSION=NTDDI_WIN11_BR"]\n'
+
+
+def test_pin_windows_ntddi_uses_the_selected_sdks_validated_target():
+    with tempfile.TemporaryDirectory() as tmp:
+        build = Path(tmp) / "BUILD.gn"
+        header = Path(tmp) / "sdkddkver.h"
+        build.write_text('defines = ["NTDDI_VERSION=NTDDI_WIN11_BR"]\n')
+        header.write_text(
+            "#define NTDDI_WIN10_VB 0x0A000008\n"
+            "#define NTDDI_WIN11_GE 0x0A00000B\n"
+            "#define WDK_NTDDI_VERSION NTDDI_WIN11_GE\n")
+        assert BV8.pin_windows_ntddi_to_sdk(build, header) == "NTDDI_WIN11_GE"
+        assert build.read_text() == 'defines = ["NTDDI_VERSION=NTDDI_WIN11_GE"]\n'
+
+
+def test_pin_windows_ntddi_is_fail_closed_on_malformed_sources():
+    with tempfile.TemporaryDirectory() as tmp:
+        build = Path(tmp) / "BUILD.gn"
+        header = Path(tmp) / "sdkddkver.h"
+        valid_header = (
+            "#define NTDDI_WIN11_GE 0x0A00000B\n"
+            "#define WDK_NTDDI_VERSION NTDDI_WIN11_GE\n")
+
+        cases = (
+            ("defines = []\n", valid_header),
+            ('NTDDI_VERSION=NTDDI_WIN11_BR\nNTDDI_VERSION=NTDDI_WIN11_BR\n',
+             valid_header),
+            ('NTDDI_VERSION=NTDDI_WIN11_BR\n', "#define NTDDI_WIN11_GE 1\n"),
+            ('NTDDI_VERSION=NTDDI_WIN11_BR\n',
+             "#define WDK_NTDDI_VERSION NTDDI_WIN11_GE\n"),
+        )
+        for build_text, header_text in cases:
+            build.write_text(build_text)
+            header.write_text(header_text)
+            try:
+                BV8.pin_windows_ntddi_to_sdk(build, header)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected NTDDI define count mismatch to fail")
+
+
 def _make_builder(platform, **extra):
     """Construct a V8Build with a minimal fake args namespace (no build invoked)."""
     args = types.SimpleNamespace(
