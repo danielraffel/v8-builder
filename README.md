@@ -80,7 +80,7 @@ never ship *below* Chromium's floor; Linux lands slightly *above*, noted below.
 | Platform | Minimum | Set where | Notes |
 |----------|---------|-----------|-------|
 | macOS | **11.0** (Big Sur) | `mac_deployment_target="11.0"` in `build-v8.py` | V8 allows 11; a consumer's own libc++ usage (e.g. `std::format` → macOS **13.3**) can raise it |
-| Linux x64 | **glibc 2.34** | `portable-linux-x64` job in `build-v8.yml` (Ubuntu 22.04 container); asserted by `tools/rhel8/check_glibc_floor.py --max 2.34` | *Measured* from the `.so` (`.gnu.version_r` max `GLIBC_x.y`), not merely declared. Loads on Ubuntu 22.04+ / Debian 12+ / RHEL 9+ / Fedora 35+ |
+| Linux x64 | **glibc 2.34, GLIBCXX 3.4.30** | `portable-linux-x64` job in `build-v8.yml` (Ubuntu 22.04 container); both floors are asserted from the built `.so` | Matches the existing M152 artifact. Loads on Ubuntu 22.04 with current updates and Debian 12+; RHEL 9/Fedora 35 are not claimed because their GCC 11 runtime may stop at GLIBCXX 3.4.29 |
 | iOS | 16.4 | `ios_deployment_target` in `build-v8.py` | Jitless `V8.framework` |
 | Windows | **Windows 10** | V8's standard toolchain default | Chromium default |
 | Android | NDK minSdk | NDK sysroot | arm64-v8a |
@@ -89,9 +89,11 @@ never ship *below* Chromium's floor; Linux lands slightly *above*, noted below.
 (`use_custom_libcxx=false`) — its public API exposes `std::` types, so Chromium's bundled
 libc++ (mangled under an ABI namespace) makes the `.so` non-drop-in. Keeping the platform
 libstdc++ then needs a **C++20**-complete one (`std::bit_cast`, `<source_location>`), i.e.
-gcc-11+, whose oldest clean base is Ubuntu 22.04 (glibc ~2.34). Rocky 8 (2.28) trips
-Chromium's bindgen (GLIBCXX); Debian 11 (gcc-10) has no C++20. (The old `build-v8-rhel8.yml`
-lane is gone.) **To change:** rebuild on a different base and adjust `check_glibc_floor.py --max`.
+gcc-12 headers plus the current Jammy libstdc++ runtime, whose measured floors are glibc
+2.34 and GLIBCXX 3.4.30. Rocky 8's stock runtime trips Chromium's bindgen; Debian 11
+(gcc-10) has no C++20. The separate `build-v8-rhel8.yml` experiment replaces Rocky's
+libstdc++ with GCC Toolset 12 and is not the release lane or a bare-RHEL-8 compatibility
+claim. **To change:** rebuild on a different base and adjust both floor gates.
 
 **To change the macOS minimum:** edit `mac_deployment_target` in `build-v8.py`.
 

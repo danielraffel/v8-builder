@@ -331,11 +331,11 @@ jobs:
           path: build/${{ matrix.cell }}
 
   # Portable Linux x64 V8, built in an Ubuntu 22.04 container so the sealed libv8.so carries
-  # a glibc 2.34 floor (loadable on Ubuntu 22.04+, Debian 12+, RHEL/Rocky 9+, Fedora 35+).
+  # a glibc 2.34 / GLIBCXX 3.4.30 floor (Ubuntu 22.04 with current updates, Debian 12+).
   # The default ubuntu-24.04 matrix cell leaked ~2.39 (use_sysroot=false + use_custom_libcxx=
-  # false inherit the build-host glibc). 22.04 (gcc-11) is the oldest clean base with a
-  # C++20 libstdc++, which V8 requires (its public API exposes std:: types, so a bundled
-  # libc++ breaks the drop-in ABI). This job replaces the linux/x64 matrix cell and feeds the
+  # false inherit the build-host glibc). Ubuntu 22.04 with GCC 12 headers and Jammy's current
+  # libstdc++ is the oldest release base claimed here; V8's public API exposes std:: types, so
+  # a bundled libc++ breaks the drop-in ABI. This job replaces the linux/x64 matrix cell and feeds the
   # same `v8-linux-x64` artifact the single-SHA gate + create-release consume. It ALWAYS runs
   # (with an internal Select gate) so a mac-only dispatch doesn't skip-block validate-all.
   # (arm64 stays the leaky matrix cell — portable-linux-arm64 is the tracked follow-up.)
@@ -364,8 +364,9 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          # build-essential = the C++20 gcc-11 system toolchain V8's BUNDLED clang links
-          # against (libstdc++ <bit>/<source_location> headers + GCC runtime/crt objects).
+          # build-essential supplies the platform ABI; GCC 12 headers provide the
+          # C++17 hardware-interference constants current V8 requires. Jammy's current
+          # system libstdc++ and the known-good M152 artifact both require 3.4.30.
           apt-get install -y --no-install-recommends \
             build-essential \
             g++-12 \
@@ -420,8 +421,8 @@ jobs:
           set -euo pipefail
           # Platform libstdc++ (use_custom_libcxx=false, unchanged). Install GCC 12
           # headers narrowly because current V8 uses C++17 hardware-interference
-          # constants missing from Jammy's GCC 11 headers. The acceptance gate below
-          # still caps the shipped runtime requirement at Jammy's GLIBCXX_3.4.29.
+          # constants absent from Jammy's GCC 11 headers. The acceptance gate below
+          # preserves the already-published M152 GLIBCXX_3.4.30 floor.
           export PATH="/usr/lib/ccache:$PATH" || true
           extra=()
           if [ -n "$V8_REVISION" ]; then
@@ -444,7 +445,7 @@ jobs:
           objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq -c
           echo "== highest =="; objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
           python3 tools/rhel8/check_glibc_floor.py --lib "$LIB" --max "2.34" --json
-          python3 tools/check_glibcxx_floor.py --lib "$LIB" --max "3.4.29" --json
+          python3 tools/check_glibcxx_floor.py --lib "$LIB" --max "3.4.30" --json
       - name: Re-run seal audit explicitly (0 ICU/zlib/Abseil leaks)
         if: steps.sel.outputs.go == 'true'
         run: |

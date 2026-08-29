@@ -27,7 +27,7 @@ def glibcxx_floor(lib):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lib", required=True, type=Path)
-    parser.add_argument("--max", default="3.4.29")
+    parser.add_argument("--max", default="3.4.30")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if not args.lib.exists():
