@@ -243,6 +243,40 @@ def test_copy_headers_overwrites_existing(tmp_path=None):
     assert not (dst / "stale").exists(), "stale tree must be removed before re-copy"
 
 
+def test_external_config_defines_are_recorded_exactly():
+    b = _make_builder("linux")
+    original_capture = BV8.capture
+    try:
+        BV8.capture = lambda *args, **kwargs: type("Result", (), {
+            "returncode": 0,
+            "stdout": '{"//:external_config":{"defines":['
+                      '"V8_CPPGC_MICROTASK_QUEUE","V8_TARGET_ARCH_X64",'
+                      '"V8_CPPGC_MICROTASK_QUEUE"]}}',
+            "stderr": "",
+        })()
+        assert b._external_config_defines(Path("out/linux-x64")) == [
+            "V8_CPPGC_MICROTASK_QUEUE", "V8_TARGET_ARCH_X64"]
+    finally:
+        BV8.capture = original_capture
+
+
+def test_capture_uses_shell_for_depot_tools_bat_on_windows():
+    calls = []
+    original_name = BV8.os.name
+    original_run = BV8.subprocess.run
+    try:
+        BV8.os.name = "nt"
+        BV8.subprocess.run = lambda command, **kwargs: calls.append((command, kwargs))
+        BV8.capture(["gn", "desc", "out/win x64", "//:external_config"])
+    finally:
+        BV8.subprocess.run = original_run
+        BV8.os.name = original_name
+    command, kwargs = calls[0]
+    assert isinstance(command, str) and command.startswith("gn desc ")
+    assert kwargs["shell"] is True
+    assert kwargs["capture_output"] is True and kwargs["text"] is True
+
+
 # --- _manifest_lib_path per-platform mapping ------------------------------------
 
 def test_manifest_lib_path_per_platform():

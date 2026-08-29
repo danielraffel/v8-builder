@@ -313,10 +313,13 @@ jobs:
               PRE=(arch -x86_64)
             fi
           fi
+          MANIFEST="build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json"
+          V8_DEFINES="$(python3 -c 'import json,sys; print(";".join(json.load(open(sys.argv[1]))["consumer_defines"]))' "$MANIFEST")"
           cmake -S validate -B validate/build "${EXTRA[@]}" \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
             -DV8_LIBRARY_PATH="$PWD/$(ls build/${{ matrix.platform }}-${{ matrix.arch }}/lib/libv8.*)" \
             -DSKIA_DIR="$SKIA_LIBDIR" \
+            "-DV8_CONSUMER_DEFINES=$V8_DEFINES" \
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build
           "${PRE[@]}" ./validate/build/v8_skia_validate
@@ -469,11 +472,13 @@ jobs:
           fi
           for z in skia/*.zip; do unzip -o "$z" -d skia; done
           VER="$(python3 -c "import json;print(json.load(open('build/linux-x64/manifest.json'))['v8_version'])")"
+          V8_DEFINES="$(python3 -c 'import json; print(";".join(json.load(open("build/linux-x64/manifest.json"))["consumer_defines"]))')"
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
           cmake -S validate -B validate/build \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
             -DV8_LIBRARY_PATH="$PWD/build/linux-x64/lib/libv8.so" \
             -DSKIA_DIR="$SKIA_LIBDIR" \
+            "-DV8_CONSUMER_DEFINES=$V8_DEFINES" \
             -DEXPECTED_V8_VERSION="$VER"
           cmake --build validate/build
           ./validate/build/v8_skia_validate
