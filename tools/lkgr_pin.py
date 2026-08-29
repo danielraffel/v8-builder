@@ -9,7 +9,9 @@ is the *source of truth* for a truly co-tested pair (proposal DEPS-PAIR / FR).
 Caveat (documented in the FR): these are the revisions Chromium expects together;
 a standalone Pulp build still needs a reproducible recipe (GN args, sysroot, libc++).
 """
-import base64, json, re, urllib.request
+import base64, json, re
+
+from http_retry import read_url
 
 DEPS_URL = "https://chromium.googlesource.com/chromium/src/+/lkgr/DEPS?format=TEXT"
 COMMIT_URL = "https://chromium.googlesource.com/chromium/src/+/lkgr?format=JSON"
@@ -18,7 +20,7 @@ KEYS = ("skia_revision", "v8_revision", "dawn_revision")
 
 
 def _gitiles_json(url):
-    raw = urllib.request.urlopen(url, timeout=30).read().decode("utf-8", "replace")
+    raw = read_url(url).decode("utf-8", "replace")
     if raw.startswith(")]}'"):
         raw = raw.split("\n", 1)[1]
     return json.loads(raw)
@@ -27,7 +29,7 @@ def _gitiles_json(url):
 def current_lock():
     commit = _gitiles_json(COMMIT_URL)
     deps_meta = _gitiles_json(DEPS_META_URL)
-    raw = urllib.request.urlopen(DEPS_URL, timeout=30).read()
+    raw = read_url(DEPS_URL)
     text = base64.b64decode(raw).decode("utf-8", "replace")
     out = {
         "source": "chromium-lkgr-deps",

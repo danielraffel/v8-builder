@@ -148,12 +148,13 @@ single-SHA gate → GitHub Release.
 Milestone-matched releases are a second, independent lane. After skia-builder publishes
 `chrome/mNNN`, it sends a `skia_milestone_published` repository dispatch to
 [`matched-milestone.yml`](.github/workflows/matched-milestone.yml). That workflow resolves
-Chromium's milestone branch, requires its `skia_revision` to equal the published Skia
-branch head, selects the branch's exact V8 SHA, records both Chromium's Dawn pin and the
-Dawn pin Skia actually built, and starts the same sealed all-platform publisher. It first
-checks existing release manifests, so repeating a dispatch does not rebuild an already
-published exact match. This lane supplies Pulp's default matched toolchain; the weekly
-LKGR lane remains available to consumers that want a newer V8.
+Chromium's milestone branch, selects its exact V8 SHA, and consumes the immutable
+`skia-release-lock.json` published by skia-builder. The manifest records both Chromium's
+Skia/Dawn pins and the Skia/Dawn revisions actually built, with explicit equality flags.
+An immediate cross-repo dispatch is the fast path; a daily reconciler repairs transient
+misses. It skips only a complete exact release or an identical queued/active build, so a
+partial or failed sweep remains retryable. This lane supplies Pulp's default matched
+toolchain; the weekly LKGR lane remains available to consumers that want a newer V8.
 
 Each matched V8 release links to its exact [Skia/Dawn release](https://github.com/danielraffel/skia-builder/releases),
 and the Skia release links back to the matching V8 milestone. Treat them as one tested
@@ -317,9 +318,10 @@ Each scheduled release therefore records two related facts:
 - The **validation target** — the skia-builder release this repo actually links against in
   the macOS/Linux coexistence harness (`validated_skia_release` in the manifest).
 
-A milestone lock additionally records `built_dawn`, because Skia follows its own DEPS and
-that Dawn SHA can differ from Chromium's milestone-branch `dawn_revision`. The manifest
-surfaces `dawn_matches_chromium` explicitly rather than overstating the relationship.
+A milestone lock additionally records `built_skia` and `built_dawn`, because the producer's
+immutable release snapshot and Skia's own DEPS can differ from Chromium's eventual
+milestone-branch pins. The manifest surfaces `skia_matches_chromium` and
+`dawn_matches_chromium` explicitly rather than overstating the relationship.
 
 A multi-platform release is gated so every per-platform artifact names the **same** V8
 revision (no mixed-revision releases). When skia-builder also publishes artifacts with the

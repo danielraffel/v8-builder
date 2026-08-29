@@ -10,7 +10,8 @@ import argparse
 import base64
 import json
 import re
-import urllib.request
+
+from http_retry import read_url
 
 
 CHROMIUMDASH = "https://chromiumdash.appspot.com/fetch_milestones?num=40"
@@ -20,7 +21,7 @@ KEYS = ("skia_revision", "v8_revision", "dawn_revision")
 
 
 def _json_url(url):
-    raw = urllib.request.urlopen(url, timeout=30).read().decode("utf-8", "replace")
+    raw = read_url(url).decode("utf-8", "replace")
     if raw.startswith(")]}'"):
         raw = raw.split("\n", 1)[1]
     return json.loads(raw)
@@ -47,9 +48,7 @@ def _extract_deps(text):
 def _skia_release_pins(tag):
     meta = _json_url(f"{SKIA_GITILES}/+/refs/heads/{tag}?format=JSON")
     revision = meta["commit"]
-    encoded = urllib.request.urlopen(
-        f"{SKIA_GITILES}/+/{revision}/DEPS?format=TEXT", timeout=30
-    ).read()
+    encoded = read_url(f"{SKIA_GITILES}/+/{revision}/DEPS?format=TEXT")
     deps = base64.b64decode(encoded).decode("utf-8", "replace")
     match = re.search(
         r'"third_party/externals/dawn"\s*:\s*"[^"]+@([0-9a-f]{40})"', deps
@@ -59,32 +58,27 @@ def _skia_release_pins(tag):
     return revision, match.group(1)
 
 
-def milestone_lock(milestone, expected_skia=None, built_dawn=None, skia_release_tag=None):
+def milestone_lock(milestone, expected_skia=None, built_skia=None, built_dawn=None,
+                   skia_release_tag=None):
     if skia_release_tag:
         wanted = f"chrome/m{milestone}"
         if skia_release_tag != wanted:
             raise SystemExit(f"milestone_pin: expected Skia release {wanted}, got {skia_release_tag}")
-        release_skia, release_dawn = _skia_release_pins(skia_release_tag)
-        if expected_skia and expected_skia != release_skia:
+        if bool(built_skia) != bool(built_dawn):
+            raise SystemExit("milestone_pin: built Skia and Dawn must be supplied together")
+        if not built_skia:
+            built_skia, built_dawn = _skia_release_pins(skia_release_tag)
+        if expected_skia and expected_skia != built_skia:
             raise SystemExit(
                 f"milestone_pin: supplied Skia {expected_skia} does not match "
-                f"{skia_release_tag} Skia {release_skia}"
+                f"{skia_release_tag} built Skia {built_skia}"
             )
-        if built_dawn and built_dawn != release_dawn:
-            raise SystemExit(
-                f"milestone_pin: supplied built Dawn {built_dawn} does not match "
-                f"{skia_release_tag} Dawn {release_dawn}"
-            )
-        expected_skia = release_skia
-        built_dawn = release_dawn
     info = _milestone_info(milestone)
     branch = str(info["chromium_branch"])
     commit_meta = _json_url(f"{GITILES}/+/refs/branch-heads/{branch}?format=JSON")
     revision = commit_meta["commit"]
     deps_meta = _json_url(f"{GITILES}/+/{revision}/DEPS?format=JSON")
-    encoded = urllib.request.urlopen(
-        f"{GITILES}/+/{revision}/DEPS?format=TEXT", timeout=30
-    ).read()
+    encoded = read_url(f"{GITILES}/+/{revision}/DEPS?format=TEXT")
     pins = _extract_deps(base64.b64decode(encoded).decode("utf-8", "replace"))
     if expected_skia and pins["skia"] != expected_skia:
         raise SystemExit(
@@ -108,6 +102,9 @@ def milestone_lock(milestone, expected_skia=None, built_dawn=None, skia_release_
     if built_dawn:
         result["built_dawn"] = built_dawn
         result["dawn_matches_chromium"] = built_dawn == pins["dawn"]
+    if built_skia:
+        result["built_skia"] = built_skia
+        result["skia_matches_chromium"] = built_skia == pins["skia"]
     if skia_release_tag:
         result["skia_release_tag"] = skia_release_tag
     return result
@@ -117,11 +114,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("milestone", type=int)
     parser.add_argument("--expected-skia")
+    parser.add_argument("--built-skia")
     parser.add_argument("--built-dawn")
     parser.add_argument("--skia-release-tag")
     args = parser.parse_args(argv)
     print(json.dumps(milestone_lock(
-        args.milestone, args.expected_skia, args.built_dawn, args.skia_release_tag
+        args.milestone, args.expected_skia, args.built_skia, args.built_dawn,
+        args.skia_release_tag
     ), indent=2))
     return 0
 
