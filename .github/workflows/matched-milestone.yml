@@ -2,6 +2,9 @@ name: Build matched milestone V8
 run-name: M${{ inputs.milestone || github.event.client_payload.milestone }} matched V8
 
 on:
+  schedule:
+    # Repair a missed/failed immediate dispatch without rebuilding an already-complete tuple.
+    - cron: '37 11 * * *'
   workflow_dispatch:
     inputs:
       milestone:
@@ -20,6 +23,10 @@ on:
         description: Optional Dawn SHA actually packaged by skia-builder
         required: false
         type: string
+      built_skia:
+        description: Optional immutable Skia SHA actually packaged by skia-builder
+        required: false
+        type: string
   repository_dispatch:
     types: [skia_milestone_published]
 
@@ -28,7 +35,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: matched-milestone-${{ inputs.milestone || github.event.client_payload.milestone }}
+  # Serialize schedule/manual/repository_dispatch before the active-run check so
+  # two entry points cannot both observe an empty build queue and dispatch twice.
+  group: matched-milestone-dispatch
   cancel-in-progress: false
 
 jobs:
@@ -36,42 +45,102 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - name: Resolve canonical target and immutable producer lock
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
+          INPUT_SKIA_RELEASE: ${{ inputs.skia_release_tag || github.event.client_payload.skia_release_tag }}
+          INPUT_BUILT_SKIA: ${{ inputs.built_skia || github.event.client_payload.skia }}
+          INPUT_BUILT_DAWN: ${{ inputs.built_dawn || github.event.client_payload.dawn }}
+        run: |
+          set -euo pipefail
+          milestone="$INPUT_MILESTONE"
+          skia_release="$INPUT_SKIA_RELEASE"
+          built_skia="$INPUT_BUILT_SKIA"
+          built_dawn="$INPUT_BUILT_DAWN"
+
+          if [ "$EVENT_NAME" = schedule ]; then
+            gh release list --repo danielraffel/skia-builder --limit 100 \
+              --json tagName,isDraft,isPrerelease > skia-releases.json
+            python3 tools/matched_release.py select-skia skia-releases.json \
+              --github-output selected.out
+            milestone="$(sed -n 's/^milestone=//p' selected.out)"
+            skia_release="$(sed -n 's/^tag=//p' selected.out)"
+          fi
+
+          [[ "$milestone" =~ ^[0-9]+$ ]]
+          [ "$skia_release" = "chrome/m$milestone" ]
+          if [ -z "$built_skia" ] || [ -z "$built_dawn" ]; then
+            rm -rf producer-lock && mkdir producer-lock
+            gh release download "$skia_release" --repo danielraffel/skia-builder \
+              --pattern skia-release-lock.json -D producer-lock
+            jq -e --arg skia_release "$skia_release" --arg milestone "$milestone" '
+              .schema == 1 and
+              .skia_release_tag == $skia_release and
+              .milestone == ($milestone | tonumber) and
+              (.built_skia | type == "string" and test("^[0-9a-f]{40}$")) and
+              (.built_dawn | type == "string" and test("^[0-9a-f]{40}$"))
+            ' producer-lock/skia-release-lock.json >/dev/null
+            built_skia="$(jq -r .built_skia producer-lock/skia-release-lock.json)"
+            built_dawn="$(jq -r .built_dawn producer-lock/skia-release-lock.json)"
+          fi
+          [[ "$built_skia" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$built_dawn" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "milestone=$milestone"
+            echo "skia_release=$skia_release"
+            echo "built_skia=$built_skia"
+            echo "built_dawn=$built_dawn"
+          } >> "$GITHUB_OUTPUT"
       - name: Resolve exact milestone lock
         id: lock
         env:
-          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
-          SKIA_RELEASE: ${{ inputs.skia_release_tag || github.event.client_payload.skia_release_tag }}
-          EXPECTED_SKIA: ${{ inputs.expected_skia || github.event.client_payload.skia }}
-          BUILT_DAWN: ${{ inputs.built_dawn || github.event.client_payload.dawn }}
+          MILESTONE: ${{ steps.target.outputs.milestone }}
+          SKIA_RELEASE: ${{ steps.target.outputs.skia_release }}
+          EXPECTED_SKIA: ${{ inputs.expected_skia }}
+          BUILT_SKIA: ${{ steps.target.outputs.built_skia }}
+          BUILT_DAWN: ${{ steps.target.outputs.built_dawn }}
         run: |
           set -euo pipefail
           [[ "$MILESTONE" =~ ^[0-9]+$ ]]
           [ "$SKIA_RELEASE" = "chrome/m$MILESTONE" ]
           args=("$MILESTONE" --skia-release-tag "$SKIA_RELEASE")
           [ -z "$EXPECTED_SKIA" ] || args+=(--expected-skia "$EXPECTED_SKIA")
+          args+=(--built-skia "$BUILT_SKIA")
           [ -z "$BUILT_DAWN" ] || args+=(--built-dawn "$BUILT_DAWN")
           python3 tools/milestone_pin.py "${args[@]}" > milestone-lock.json
           python3 -m json.tool milestone-lock.json
-          echo "v8=$(jq -r .v8 milestone-lock.json)" >> "$GITHUB_OUTPUT"
-          echo "lock_b64=$(base64 -w0 milestone-lock.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "v8=$(jq -r .v8 milestone-lock.json)"
+            echo "lock_b64=$(base64 -w0 milestone-lock.json)"
+            echo "target_id=chromium-m${MILESTONE}-$(jq -r .v8 milestone-lock.json | cut -c1-12)"
+          } >> "$GITHUB_OUTPUT"
       - name: Skip an already-published exact match
         id: existing
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_V8: ${{ steps.lock.outputs.v8 }}
-          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
+          MILESTONE: ${{ steps.target.outputs.milestone }}
+          BUILT_SKIA: ${{ steps.target.outputs.built_skia }}
+          BUILT_DAWN: ${{ steps.target.outputs.built_dawn }}
+          SKIA_RELEASE: ${{ steps.target.outputs.skia_release }}
         run: |
           set -euo pipefail
           found=false
+          jq -n --argjson milestone "$MILESTONE" --arg v8 "$EXPECTED_V8" \
+            --arg built_skia "$BUILT_SKIA" --arg built_dawn "$BUILT_DAWN" \
+            --arg skia_release_tag "$SKIA_RELEASE" \
+            '{milestone:$milestone,v8:$v8,built_skia:$built_skia,built_dawn:$built_dawn,
+              skia_release_tag:$skia_release_tag}' > expected.json
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
-            asset="$(gh release view "$tag" --json assets --jq '[.assets[].name|select(endswith(".zip"))][0] // ""')"
-            [ -n "$asset" ] || continue
             rm -rf probe && mkdir probe
-            gh release download "$tag" --pattern "$asset" -D probe
-            if unzip -p "probe/$asset" manifest.json 2>/dev/null | jq -e \
-              --arg v8 "$EXPECTED_V8" --argjson milestone "$MILESTONE" \
-              '.pair.v8 == $v8 and .pair.milestone == $milestone' >/dev/null; then
+            gh release view "$tag" --json tagName,assets > probe/release.json
+            gh release download "$tag" --pattern release-metadata.json -D probe 2>/dev/null || continue
+            if [ "$(python3 tools/matched_release.py check-release \
+              probe/release.json probe/release-metadata.json expected.json | jq -r .complete)" = true ]; then
               echo "Exact M$MILESTONE V8 tuple already published as $tag"
               found=true
               break
@@ -79,18 +148,30 @@ jobs:
           done < <(gh release list --limit 100 --exclude-drafts --exclude-pre-releases --json tagName \
             --jq ".[].tagName | select(startswith(\"v8-m${MILESTONE}-\"))")
           echo "found=$found" >> "$GITHUB_OUTPUT"
-      - name: Dispatch sealed all-platform release
+      - name: Skip an identical queued or active build
+        id: active
         if: steps.existing.outputs.found != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_ID: ${{ steps.lock.outputs.target_id }}
+        run: |
+          gh run list --workflow build-v8.yml --limit 100 \
+            --json displayTitle,status > active-runs.json
+          python3 tools/matched_release.py check-active active-runs.json "$TARGET_ID" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Dispatch sealed all-platform release
+        if: steps.existing.outputs.found != 'true' && steps.active.outputs.active != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           V8_REVISION: ${{ steps.lock.outputs.v8 }}
           LOCK_B64: ${{ steps.lock.outputs.lock_b64 }}
-          MILESTONE: ${{ inputs.milestone || github.event.client_payload.milestone }}
-          SKIA_RELEASE: ${{ inputs.skia_release_tag || github.event.client_payload.skia_release_tag }}
+          MILESTONE: ${{ steps.target.outputs.milestone }}
+          SKIA_RELEASE: ${{ steps.target.outputs.skia_release }}
+          TARGET_ID: ${{ steps.lock.outputs.target_id }}
         run: |
           gh workflow run build-v8.yml \
             -f platforms=all \
-            -f release_target_id="chromium-m${MILESTONE}-${V8_REVISION:0:12}" \
+            -f release_target_id="$TARGET_ID" \
             -f v8_revision="$V8_REVISION" \
             -f lkgr_lock_b64="$LOCK_B64" \
             -f skia_release_tag="$SKIA_RELEASE" \

@@ -19,6 +19,7 @@ Runs two ways, no third-party deps required:
 """
 import importlib.util
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -35,6 +36,47 @@ def _load_build_module():
 
 
 BV8 = _load_build_module()
+
+
+def test_select_windows_sdk_uses_newest_complete_installation():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for version in ("10.0.22000.0", "10.0.26100.0", "10.0.28000.0"):
+            (root / "Include" / version).mkdir(parents=True)
+        for version in ("10.0.22000.0", "10.0.26100.0"):
+            for part in ("shared", "ucrt", "um"):
+                (root / "Include" / version / part).mkdir()
+            for part in ("ucrt", "um"):
+                (root / "Lib" / version / part).mkdir(parents=True)
+            (root / "bin" / version / "x64").mkdir(parents=True)
+        # The newest advertised directory is intentionally incomplete.
+        assert BV8.select_windows_sdk(root) == "10.0.26100.0"
+
+
+def test_patch_windows_sdk_version_patches_both_coupled_sources():
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = (
+            Path(tmp) / "vs_toolchain.py",
+            Path(tmp) / "setup_toolchain.py",
+        )
+        for path in paths:
+            path.write_text("SDK_VERSION = '10.0.28000.0'\nargs.append(SDK_VERSION)\n")
+            BV8.patch_windows_sdk_version(path, "10.0.26100.0")
+        for path in paths:
+            assert path.read_text().startswith("SDK_VERSION = '10.0.26100.0'\n")
+
+
+def test_patch_windows_sdk_version_rejects_missing_or_duplicate_assignment():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "toolchain.py"
+        for contents in ("SDK_VERSION_FROM_ENV = True\n", "SDK_VERSION = 'a'\nSDK_VERSION = 'b'\n"):
+            path.write_text(contents)
+            try:
+                BV8.patch_windows_sdk_version(path, "10.0.26100.0")
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected SDK assignment count mismatch to fail")
 
 
 def _make_builder(platform, **extra):
@@ -258,11 +300,14 @@ def test_milestone_contract_preserves_built_dawn_truth(tmp_path=None):
     lock.write_text(
         '{"source":"chromium-milestone-branch-deps","pair_kind":"chromium-milestone",'
         '"milestone":152,"chromium_branch":"7977","skia":"skia","v8":"built",'
-        '"dawn":"chromium-dawn","built_dawn":"skia-dawn","dawn_matches_chromium":false}'
+        '"dawn":"chromium-dawn","built_skia":"built-skia","skia_matches_chromium":false,'
+        '"built_dawn":"skia-dawn","dawn_matches_chromium":false}'
     )
     b = _make_builder("mac", lkgr_lock=str(lock), skia_release_tag="chrome/m152")
     b._built_v8_sha = lambda: "built"
     c = b._lkgr_contract()
+    assert c["built_skia"] == "built-skia"
+    assert c["skia_matches_chromium"] is False
     assert c["pair_kind"] == "chromium-milestone"
     assert c["milestone"] == 152
     assert c["built_dawn"] == "skia-dawn"

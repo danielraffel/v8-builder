@@ -31,7 +31,7 @@ class MilestonePinTests(unittest.TestCase):
                 return Response(base64.b64encode(deps.encode()))
             raise AssertionError(url)
 
-        with patch.object(mp.urllib.request, "urlopen", fake_open):
+        with patch.object(mp, "read_url", lambda url: fake_open(url).read()):
             lock = mp.milestone_lock(152, expected_skia="1" * 40, built_dawn="4" * 40)
         self.assertEqual(lock["v8"], "2" * 40)
         self.assertEqual(lock["dawn"], "3" * 40)
@@ -46,7 +46,7 @@ class MilestonePinTests(unittest.TestCase):
         fake_json = lambda url: {"commit": "a" * 40} if "branch-heads" in url else {"id": "b" * 40}
         with patch.object(mp, "_milestone_info", lambda milestone: {"chromium_branch": "7977"}), \
              patch.object(mp, "_json_url", fake_json), \
-             patch.object(mp.urllib.request, "urlopen", lambda *a, **k: Response(base64.b64encode(deps.encode()))):
+             patch.object(mp, "read_url", lambda *a, **k: base64.b64encode(deps.encode())):
             with self.assertRaisesRegex(SystemExit, "does not match published Skia"):
                 mp.milestone_lock(152, expected_skia="9" * 40)
 
@@ -54,8 +54,21 @@ class MilestonePinTests(unittest.TestCase):
         with patch.object(mp, "_skia_release_pins", return_value=("1" * 40, "4" * 40)):
             with self.assertRaisesRegex(SystemExit, "supplied Skia .* does not match"):
                 mp.milestone_lock(152, expected_skia="9" * 40, skia_release_tag="chrome/m152")
-            with self.assertRaisesRegex(SystemExit, "supplied built Dawn .* does not match"):
-                mp.milestone_lock(152, built_dawn="9" * 40, skia_release_tag="chrome/m152")
+
+    def test_records_built_skia_mismatch_without_overstating_tuple(self):
+        with patch.object(mp, "_milestone_info", lambda milestone: {"chromium_branch": "7977"}), \
+             patch.object(mp, "_json_url", lambda url: {"commit": "a" * 40} if "branch-heads" in url else {"id": "b" * 40}), \
+             patch.object(mp, "read_url", lambda url: base64.b64encode((
+                 "'skia_revision': '1111111111111111111111111111111111111111',\n"
+                 "'v8_revision': '2222222222222222222222222222222222222222',\n"
+                 "'dawn_revision': '3333333333333333333333333333333333333333',\n"
+             ).encode())):
+            lock = mp.milestone_lock(
+                152, built_skia="9" * 40, built_dawn="4" * 40,
+                skia_release_tag="chrome/m152")
+        self.assertEqual(lock["built_skia"], "9" * 40)
+        self.assertFalse(lock["skia_matches_chromium"])
+        self.assertFalse(lock["dawn_matches_chromium"])
 
 
 if __name__ == "__main__":

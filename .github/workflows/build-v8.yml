@@ -368,6 +368,7 @@ jobs:
           # against (libstdc++ <bit>/<source_location> headers + GCC runtime/crt objects).
           apt-get install -y --no-install-recommends \
             build-essential \
+            g++-12 \
             git python3 python3-pip \
             curl ca-certificates file xz-utils bzip2 zip unzip tar \
             locales pkg-config binutils libatomic1 libglib2.0-dev \
@@ -417,8 +418,10 @@ jobs:
           CCACHE_MAXSIZE: 4G
         run: |
           set -euo pipefail
-          # Platform libstdc++ (use_custom_libcxx=false, unchanged) — gcc-11 on 22.04 is
-          # C++20-complete, so no bundling and the .so stays drop-in for consumers.
+          # Platform libstdc++ (use_custom_libcxx=false, unchanged). Install GCC 12
+          # headers narrowly because current V8 uses C++17 hardware-interference
+          # constants missing from Jammy's GCC 11 headers. The acceptance gate below
+          # still caps the shipped runtime requirement at Jammy's GLIBCXX_3.4.29.
           export PATH="/usr/lib/ccache:$PATH" || true
           extra=()
           if [ -n "$V8_REVISION" ]; then
@@ -441,6 +444,7 @@ jobs:
           objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq -c
           echo "== highest =="; objdump -T "$LIB" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
           python3 tools/rhel8/check_glibc_floor.py --lib "$LIB" --max "2.34" --json
+          python3 tools/check_glibcxx_floor.py --lib "$LIB" --max "3.4.29" --json
       - name: Re-run seal audit explicitly (0 ICU/zlib/Abseil leaks)
         if: steps.sel.outputs.go == 'true'
         run: |
@@ -494,7 +498,7 @@ jobs:
 
   create-release:
     needs: validate-all
-    if: ${{ !inputs.skip_release }}
+    if: ${{ !inputs.skip_release && inputs.platforms == 'all' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -548,6 +552,32 @@ jobs:
             ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${release_id}.zip" . \
                 -x 'validate/*' -x '*/.DS_Store' -x '__MACOSX/*' )
           done
+          python3 - <<'PY'
+          import glob, json, os
+          expected = {
+              'v8-mac-arm64', 'v8-mac-x86_64', 'v8-linux-arm64', 'v8-linux-x64',
+              'v8-win-x64', 'v8-win-arm64', 'v8-android-arm64',
+              'v8-ios-simulator-arm64',
+          }
+          zips = sorted(os.path.basename(p) for p in glob.glob('release/*.zip'))
+          missing = sorted(prefix for prefix in expected
+                           if not any(name.startswith(prefix + '-') for name in zips))
+          if len(zips) != len(expected) or missing:
+              raise SystemExit(f'incomplete release assets: count={len(zips)} missing={missing}')
+          manifests = []
+          for path in sorted(glob.glob('artifacts/**/manifest.json', recursive=True)):
+              data = json.load(open(path))
+              manifests.append({
+                  'platform': data.get('platform'),
+                  'arch': data.get('arch'),
+                  'pair': data.get('pair') or {},
+              })
+          if len(manifests) != len(expected):
+              raise SystemExit(f'incomplete release manifests: {len(manifests)}')
+          pair = json.load(open('release/meta.json')).get('pair') or {}
+          json.dump({'schema': 1, 'assets': zips, 'pair': pair, 'manifests': manifests},
+                    open('release/release-metadata.json', 'w'), indent=2)
+          PY
           python3 - "$display_version" release/meta.json > release/RELEASE_NOTES.md <<'PY'
           import json, glob, sys
           ver = sys.argv[1]
@@ -568,6 +598,8 @@ jobs:
               print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
               print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")
               print(f"- Skia: `{pair0.get('skia', 'unknown')}`")
+              print(f"- Skia actually built: `{pair0.get('built_skia', 'unknown')}`")
+              print(f"- Skia pin identical: `{pair0.get('skia_matches_chromium', False)}`")
               print(f"- V8: `{pair0.get('v8', 'unknown')}`")
               print(f"- Chromium Dawn: `{pair0.get('dawn', 'unknown')}`")
               print(f"- Skia-built Dawn: `{pair0.get('built_dawn', 'unknown')}`")
@@ -607,13 +639,14 @@ jobs:
           ver="${{ steps.pkg.outputs.ver }}"
           tag="v8-${ver}"
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" release/*.zip --repo "${{ github.repository }}" --clobber
+            gh release upload "$tag" release/*.zip release/release-metadata.json \
+              --repo "${{ github.repository }}" --clobber
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \
               --title "${{ steps.pkg.outputs.title }}" \
               --notes-file release/RELEASE_NOTES.md \
-              release/*.zip
+              release/*.zip release/release-metadata.json
           fi
           gh release view "$tag" --repo "${{ github.repository }}" --json tagName,assets \
             --jq '{tag:.tagName, assets:[.assets[].name]}'

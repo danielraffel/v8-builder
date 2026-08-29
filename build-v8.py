@@ -469,6 +469,42 @@ def run(cmd, cwd=None, env=None):
         subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
+def select_windows_sdk(kits_root):
+    """Return the newest complete installed Windows 10 SDK version."""
+    root = Path(kits_root)
+    include_root = root / "Include"
+    candidates = []
+    for entry in include_root.iterdir() if include_root.is_dir() else ():
+        version = entry.name
+        complete = (
+            entry.is_dir()
+            and all((entry / part).is_dir() for part in ("shared", "ucrt", "um"))
+            and all((root / "Lib" / version / part).is_dir() for part in ("ucrt", "um"))
+            and (root / "bin" / version / "x64").is_dir()
+        )
+        if complete:
+            try:
+                key = tuple(int(piece) for piece in version.split("."))
+            except ValueError:
+                continue
+            candidates.append((key, version))
+    if not candidates:
+        raise SystemExit(f"no complete Windows SDK found under {root}")
+    return max(candidates)[1]
+
+
+def patch_windows_sdk_version(path, sdk):
+    """Replace exactly one upstream SDK_VERSION assignment in one source file."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r"(?m)^SDK_VERSION\s*=\s*(['\"])[^'\"]+\1\s*$",
+        f"SDK_VERSION = '{sdk}'", text)
+    if count != 1:
+        raise SystemExit(f"expected exactly one SDK_VERSION in {path}, found {count}")
+    path.write_text(updated, encoding="utf-8")
+
+
 class V8Build:
     def __init__(self, args):
         self.args = args
@@ -479,10 +515,31 @@ class V8Build:
         self.env = dict(os.environ)
         self.env["PATH"] = f"{DEPOT_TOOLS_PATH}{os.pathsep}{self.env.get('PATH','')}"
         self.env["DEPOT_TOOLS_UPDATE"] = "1"
+        self.windows_sdk = None
         if os.name == "nt":
             # Use the runner's local Visual Studio + Windows SDK, not Google's internal
             # win toolchain (which external builders can't fetch). windows-2022 has VS2022.
             self.env["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+            kits_root = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10"
+            sdk = select_windows_sdk(kits_root)
+            self.windows_sdk = sdk
+            for stale in ("INCLUDE", "LIB", "LIBPATH"):
+                self.env.pop(stale, None)
+            self.env["WindowsSdkDir"] = str(kits_root) + "\\"
+            self.env["WindowsSDKVersion"] = sdk + "\\"
+            self.env["UCRTVersion"] = sdk
+            say(f"selected installed Windows SDK {sdk}")
+
+    def pin_windows_sdk_source(self):
+        if self.args.platform != "win":
+            return
+        sdk_sources = (
+            V8_DIR / "build" / "vs_toolchain.py",
+            V8_DIR / "build" / "toolchain" / "win" / "setup_toolchain.py",
+        )
+        for path in sdk_sources:
+            patch_windows_sdk_version(path, self.windows_sdk)
+        say(f"pinned both V8 Windows toolchain sources to installed SDK {self.windows_sdk}")
 
     def setup_depot_tools(self):
         if not DEPOT_TOOLS_PATH.exists():
@@ -1052,8 +1109,11 @@ class V8Build:
                 "skia",
                 "v8",
                 "dawn",
+                "built_skia",
+                "skia_matches_chromium",
                 "built_dawn",
                 "dawn_matches_chromium",
+                "skia_release_tag",
                 "repos",
             ):
                 if k in d:
@@ -1373,6 +1433,7 @@ class V8Build:
                 cwd=SRC_DIR, env=self.env)
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
+        self.pin_windows_sdk_source()
         self.inject_seal_target()
         self.inject_win_validator()
         self.inject_android_validator()
