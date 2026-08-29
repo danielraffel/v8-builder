@@ -133,7 +133,10 @@ harness (the android / win-arm64 cross-built identity validators) rides along in
 released zip — a consumer never needs it. `manifest.json` records the exact V8 revision,
 arch, ABI flags, the relative path to the shipped binary (`lib`), the Skia release the
 artifact was validated against, and — for scheduled releases — the Chromium LKGR
-Skia/V8/Dawn tuple the V8 SHA came from.
+Skia/V8/Dawn tuple the V8 SHA came from. It also records `consumer_defines`, the exact
+embedder-facing compile definitions emitted by V8's generated `//:external_config`.
+Apply every entry when compiling a consumer against the packaged headers; this list is
+part of the public header/ABI contract and can change between V8 revisions.
 
 A multi-platform release is **single-SHA gated**: every artifact must name the same V8
 revision, or the release is rejected — so a downloaded set is never mixed-revision.
@@ -240,11 +243,11 @@ details only for your platform.
 
 | Platform | Compile with | Also link | Define | Re-sign? |
 |---|---|---|---|---|
-| **macOS** | clang, platform `libc++` | — | — | yes — ad-hoc signed; re-sign with your Developer ID |
-| **Linux** | clang/gcc, `libstdc++` | — | — | no |
-| **Windows** | **clang-cl** (not MSVC `cl`) | `msvcprt.lib` (+ `lib/libc++.lib` **only if** you use iostreams/`std::` types or choc — see below) | `V8_COMPRESS_POINTERS` | optional (Authenticode) |
-| **Android** | NDK clang, Chromium-style `libc++` | — | — | APK signature covers it |
-| **iOS** | Xcode (framework is jitless) | — | — | yes for device; simulator slice as-shipped |
+| **macOS** | clang, platform `libc++` | — | manifest `consumer_defines` | yes — ad-hoc signed; re-sign with your Developer ID |
+| **Linux** | clang/gcc, `libstdc++` | — | manifest `consumer_defines` | no |
+| **Windows** | **clang-cl** (not MSVC `cl`) | `msvcprt.lib` (+ `lib/libc++.lib` **only if** you use iostreams/`std::` types or choc — see below) | manifest `consumer_defines` | optional (Authenticode) |
+| **Android** | NDK clang, Chromium-style `libc++` | — | manifest `consumer_defines` | APK signature covers it |
+| **iOS** | Xcode (framework is jitless) | — | manifest `consumer_defines` | yes for device; simulator slice as-shipped |
 
 ### ABI contract (match the build)
 
@@ -267,9 +270,11 @@ details only for your platform.
   `_LIBCPP_ABI_NAMESPACE=__Cr`). When you do need it: link it next to `msvcprt.lib` (the
   objects were built with `_CRT_STDIO_ISO_WIDE_SPECIFIERS=1`, so they won't trip an
   `lld-link /FAILIFMISMATCH`) and compile with **clang-cl + that same libc++**.
-- **Pointer compression.** Define `V8_COMPRESS_POINTERS` to match the build (off on
-  macOS/Linux/Android, **on** on Windows). A mismatch makes `V8::Initialize` abort with an
-  explicit embedder-vs-V8 message.
+- **Public feature defines.** Apply every string in `manifest.json`'s
+  `consumer_defines` to consumer translation units. This includes pointer compression
+  where enabled and newer public-header switches such as `V8_CPPGC_MICROTASK_QUEUE`.
+  Missing one can change public class layout/API, fail compilation, or make
+  `V8::Initialize` abort with an explicit embedder-vs-V8 mismatch.
 
 ### Integration footguns
 

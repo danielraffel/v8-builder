@@ -41,6 +41,10 @@ LIB="$PKG/jniLibs/arm64-v8a/libv8.so"
 [ -f "$LIB" ] || LIB="$PKG/lib/libv8.so"
 INC="$PKG/include"
 VER="$(python3 -c "import json;print(json.load(open('$PKG/manifest.json'))['v8_version'])")"
+CONSUMER_DEFINES=()
+while IFS= read -r definition; do
+  [ -n "$definition" ] && CONSUMER_DEFINES+=("-D$definition")
+done < <(python3 -c "import json; print(*json.load(open('$PKG/manifest.json'))['consumer_defines'], sep='\\n')")
 
 # clang's android driver hard-adds `-l:libunwind.a`; the cipd toolchain ships none, so
 # archive V8's bundled libunwind objects (the same unwinder V8 uses) to satisfy it.
@@ -56,6 +60,7 @@ echo "[android-gate] linking __Cr-libc++ consumer (aarch64-linux-android$API) ag
   -L"$UWDIR" \
   -isystem "$LIBCXXCFG" -isystem "$LIBCXX" -isystem "$LIBCXXABI" \
   -I"$INC" \
+  "${CONSUMER_DEFINES[@]}" \
   -DEXPECTED_V8_VERSION="\"$VER\"" \
   "$HERE/consumer_main.cpp" "$LIB" \
   -Wl,--start-group "$CXXA" "$CXXABIA" -l:libunwind.a -Wl,--end-group \

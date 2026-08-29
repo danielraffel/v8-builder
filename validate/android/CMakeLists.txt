@@ -43,6 +43,9 @@ endif()
 add_executable(v8_android_consumer consumer_main.cpp)
 target_include_directories(v8_android_consumer PRIVATE ${V8_INCLUDE_DIR})
 target_compile_definitions(v8_android_consumer PRIVATE EXPECTED_V8_VERSION="${EXPECTED_V8_VERSION}")
+if(DEFINED V8_CONSUMER_DEFINES)
+  target_compile_definitions(v8_android_consumer PRIVATE ${V8_CONSUMER_DEFINES})
+endif()
 
 # Link the sealed libv8.so by absolute path (a relative path would be treated as a -l
 # library NAME by cmake). The NDK toolchain links the NDK's libc++ (c++_shared by

@@ -469,6 +469,15 @@ def run(cmd, cwd=None, env=None):
         subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
+def capture(cmd, cwd=None, env=None):
+    """Run a command and capture text, including depot_tools .bat resolution on Windows."""
+    if os.name == "nt" and isinstance(cmd, list):
+        return subprocess.run(
+            subprocess.list2cmdline([str(c) for c in cmd]),
+            cwd=cwd, env=env, shell=True, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+
+
 def select_windows_sdk(kits_root):
     """Return the newest complete installed Windows 10 SDK version."""
     root = Path(kits_root)
@@ -1185,7 +1194,32 @@ class V8Build:
             kept += 1
         say(f"copied {kept} headers (*.h/*.inc only) into {dst}")
 
-    def package(self, sealed, arch):
+    def _external_config_defines(self, out):
+        """Return V8's exact embedder-facing compile definitions for this build.
+
+        V8's //:external_config is the public header/ABI contract.  Recording the
+        generated config instead of maintaining a second hand-written list keeps
+        consumers aligned when upstream adds a feature define (for example
+        V8_CPPGC_MICROTASK_QUEUE in V8 15.4).
+        """
+        proc = capture(
+            ["gn", "desc", str(out), "//:external_config", "defines", "--format=json"],
+            cwd=V8_DIR, env=self.env)
+        if proc.returncode != 0:
+            raise SystemExit(
+                "failed to read V8 //:external_config defines:\n" + proc.stderr)
+        try:
+            payload = json.loads(proc.stdout)
+            defines = payload["//:external_config"]["defines"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"malformed gn desc //:external_config output: {exc}\n{proc.stdout}")
+        if not isinstance(defines, list) or not all(isinstance(x, str) for x in defines):
+            raise SystemExit("gn desc //:external_config defines was not a string list")
+        # Preserve GN's order while rejecting accidental duplicates in the consumer contract.
+        return list(dict.fromkeys(defines))
+
+    def package(self, sealed, arch, out):
         dest = BUILD_DIR / self._cell_id(arch)
         is_ios = self.args.platform == "ios"
         # Headers: every platform EXCEPT iOS ships a top-level include/. iOS embeds its
@@ -1206,6 +1240,9 @@ class V8Build:
             # Android lays the .so out the idiomatic way (jniLibs/<abi>/libv8.so) and ships
             # no lib/ duplicate; iOS ships the framework; the rest ship lib/<name>.
             "lib": self._manifest_lib_path(sealed, arch),
+            # Exact public compile contract emitted by V8's generated GN config. Consumers
+            # must apply every entry; feature defines can change public class layout/API.
+            "consumer_defines": self._external_config_defines(out),
             # FR1 pairing contract (LKGR triple + this_artifact + built_revision):
             "pair": self._lkgr_contract(),
         }
@@ -1483,7 +1520,7 @@ class V8Build:
             # Windows: stage the __Cr libc++.lib into lib/ BEFORE package() so the
             # manifest records it (task #17). No-op off Windows.
             self.build_win_libcxx(out, arch)
-            self.package(sealed, arch)
+            self.package(sealed, arch, out)
             if self.args.platform == "win":
                 self.validate_win_identity(out, arch)
             if self.args.platform == "android":

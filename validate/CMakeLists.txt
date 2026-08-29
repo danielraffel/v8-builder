@@ -24,6 +24,11 @@ endif()
 add_executable(v8_skia_validate identity_main.cpp smoke_gpu.cpp)
 target_include_directories(v8_skia_validate PRIVATE ${V8_INCLUDE_DIR})
 target_compile_definitions(v8_skia_validate PRIVATE EXPECTED_V8_VERSION="${EXPECTED_V8_VERSION}")
+if(DEFINED V8_CONSUMER_DEFINES)
+  # Passed verbatim from manifest.json's consumer_defines. This is V8's generated
+  # //:external_config and therefore part of the public header/ABI contract.
+  target_compile_definitions(v8_skia_validate PRIVATE ${V8_CONSUMER_DEFINES})
+endif()
 
 # Link Skia's ICU archive normally: the linker pulls the ICU members that smoke_gpu
 # references (u_errorName, ubrk_countAvailable), putting Skia's FLAT ICU symbols in the
