@@ -505,6 +505,39 @@ def patch_windows_sdk_version(path, sdk):
     path.write_text(updated, encoding="utf-8")
 
 
+def pin_windows_ntddi_to_sdk(build_config, sdkddkver):
+    """Keep the configured NTDDI macro, or use the selected SDK's own target."""
+    build_path = Path(build_config)
+    header_path = Path(sdkddkver)
+    build_text = build_path.read_text(encoding="utf-8")
+    configured = re.findall(r"NTDDI_VERSION=(NTDDI_[A-Z0-9_]+)", build_text)
+    if len(configured) != 1:
+        raise SystemExit(
+            f"expected exactly one NTDDI_VERSION macro in {build_path}, found {len(configured)}")
+
+    header_text = header_path.read_text(encoding="utf-8", errors="replace")
+    defined = set(re.findall(
+        r"(?m)^\s*#\s*define\s+(NTDDI_[A-Z0-9_]+)(?:\s|$)", header_text))
+    current = configured[0]
+    if current in defined:
+        return current
+
+    targets = re.findall(
+        r"(?m)^\s*#\s*define\s+WDK_NTDDI_VERSION\s+(NTDDI_[A-Z0-9_]+)\s*(?://.*)?$",
+        header_text)
+    if len(targets) != 1 or targets[0] not in defined:
+        raise SystemExit(
+            f"could not resolve one valid WDK_NTDDI_VERSION target from {header_path}")
+    target = targets[0]
+    updated, count = re.subn(
+        rf"NTDDI_VERSION={re.escape(current)}",
+        f"NTDDI_VERSION={target}", build_text)
+    if count != 1:
+        raise SystemExit(f"failed to replace exactly one NTDDI macro in {build_path}")
+    build_path.write_text(updated, encoding="utf-8")
+    return target
+
+
 class V8Build:
     def __init__(self, args):
         self.args = args
@@ -516,6 +549,7 @@ class V8Build:
         self.env["PATH"] = f"{DEPOT_TOOLS_PATH}{os.pathsep}{self.env.get('PATH','')}"
         self.env["DEPOT_TOOLS_UPDATE"] = "1"
         self.windows_sdk = None
+        self.windows_kits_root = None
         if os.name == "nt":
             # Use the runner's local Visual Studio + Windows SDK, not Google's internal
             # win toolchain (which external builders can't fetch). windows-2022 has VS2022.
@@ -523,6 +557,7 @@ class V8Build:
             kits_root = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10"
             sdk = select_windows_sdk(kits_root)
             self.windows_sdk = sdk
+            self.windows_kits_root = kits_root
             for stale in ("INCLUDE", "LIB", "LIBPATH"):
                 self.env.pop(stale, None)
             self.env["WindowsSdkDir"] = str(kits_root) + "\\"
@@ -539,7 +574,12 @@ class V8Build:
         )
         for path in sdk_sources:
             patch_windows_sdk_version(path, self.windows_sdk)
-        say(f"pinned both V8 Windows toolchain sources to installed SDK {self.windows_sdk}")
+        ntddi = pin_windows_ntddi_to_sdk(
+            V8_DIR / "build" / "config" / "win" / "BUILD.gn",
+            self.windows_kits_root / "Include" / self.windows_sdk / "shared" / "sdkddkver.h")
+        say(
+            f"pinned V8 Windows toolchain to installed SDK {self.windows_sdk} "
+            f"with compatible {ntddi}")
 
     def setup_depot_tools(self):
         if not DEPOT_TOOLS_PATH.exists():
