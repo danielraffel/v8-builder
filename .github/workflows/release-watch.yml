@@ -75,11 +75,12 @@ jobs:
           echo "last=$LAST_TAG" >> "$GITHUB_OUTPUT"
 
           last_args=()
+          metadata_args=()
           if [ -n "$LAST_TAG" ]; then
+            mkdir -p last-release
             ASSET="$(gh release view "$LAST_TAG" --repo "${{ github.repository }}" \
               --json assets --jq '[.assets[].name | select(endswith(".zip"))][0] // ""')"
             if [ -n "$ASSET" ]; then
-              mkdir -p last-release
               gh release download "$LAST_TAG" --repo "${{ github.repository }}" \
                 --pattern "$ASSET" -D last-release
               if unzip -p "last-release/$ASSET" manifest.json > last-manifest.json; then
@@ -92,11 +93,18 @@ jobs:
             else
               echo "::warning::latest release $LAST_TAG has no zip assets; dispatching conservatively"
             fi
+            if gh release download "$LAST_TAG" --repo "${{ github.repository }}" \
+                --pattern release-metadata.json -D last-release; then
+              metadata_args=(--last-release-metadata last-release/release-metadata.json)
+            else
+              echo "::warning::latest release $LAST_TAG has no release metadata; dispatching conservatively"
+            fi
           fi
 
           python3 tools/lkgr_decision.py \
             --current lkgr-lock.json \
             "${last_args[@]}" \
+            "${metadata_args[@]}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Dispatch sweep + open tracking issue

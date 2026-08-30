@@ -27,7 +27,10 @@ class MatchedReleaseTests(unittest.TestCase):
         expected = {"milestone": 153, "v8": "v" * 40, "built_skia": "s" * 40,
                     "built_dawn": "d" * 40, "skia_release_tag": "chrome/m153"}
         names = [f"{prefix}-release.zip" for prefix in mr.EXPECTED_ASSET_PREFIXES]
-        manifests = [{"pair": dict(expected)} for _ in names]
+        manifests = [
+            {"pair": dict(expected), "consumer_defines": ["V8_TEST_DEFINE"]}
+            for _ in names
+        ]
         metadata = {"assets": names, "pair": dict(expected), "manifests": manifests}
         release = {"assets": [{"name": name} for name in names] + [{"name": "release-metadata.json"}]}
         self.assertTrue(mr.release_is_complete(release, metadata, expected))
@@ -36,6 +39,9 @@ class MatchedReleaseTests(unittest.TestCase):
             metadata, expected))
         bad = {**metadata, "pair": {**expected, "v8": "wrong"}}
         self.assertFalse(mr.release_is_complete(release, bad, expected))
+        missing_defines = {**metadata, "manifests": [dict(item) for item in manifests]}
+        missing_defines["manifests"][0].pop("consumer_defines")
+        self.assertFalse(mr.release_is_complete(release, missing_defines, expected))
 
 
 if __name__ == "__main__":
