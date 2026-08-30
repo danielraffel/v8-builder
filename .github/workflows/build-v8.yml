@@ -573,11 +573,14 @@ jobs:
           manifests = []
           for path in sorted(glob.glob('artifacts/**/manifest.json', recursive=True)):
               data = json.load(open(path))
-              manifests.append({
-                  'platform': data.get('platform'),
-                  'arch': data.get('arch'),
-                  'pair': data.get('pair') or {},
-              })
+              defines = data.get('consumer_defines')
+              if (not isinstance(defines, list) or not defines or
+                      any(not isinstance(item, str) or not item for item in defines)):
+                  raise SystemExit(f'missing consumer_defines in {path}')
+              # Preserve the complete per-platform manifest.  Selectively copying fields
+              # here previously dropped consumer_defines from release-metadata.json even
+              # though every archive carried the correct manifest.json.
+              manifests.append(data)
           if len(manifests) != len(expected):
               raise SystemExit(f'incomplete release manifests: {len(manifests)}')
           pair = json.load(open('release/meta.json')).get('pair') or {}

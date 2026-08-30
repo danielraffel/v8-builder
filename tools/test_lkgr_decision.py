@@ -25,8 +25,20 @@ def _manifest(skia="skia-a", v8="v8-a", dawn="dawn-a"):
     return {"pair": {"skia": skia, "v8": v8, "dawn": dawn}}
 
 
+def _metadata(skia="skia-a", v8="v8-a", dawn="dawn-a"):
+    pair = {"skia": skia, "v8": v8, "dawn": dawn}
+    return {
+        "assets": [f"asset-{i}.zip" for i in range(lkgr_decision.EXPECTED_PLATFORM_COUNT)],
+        "pair": pair,
+        "manifests": [
+            {"pair": dict(pair), "consumer_defines": ["V8_TEST_DEFINE"]}
+            for _ in range(lkgr_decision.EXPECTED_PLATFORM_COUNT)
+        ],
+    }
+
+
 def test_matching_tuple_does_not_dispatch():
-    result = lkgr_decision.decide(_lock(), _manifest())
+    result = lkgr_decision.decide(_lock(), _manifest(), _metadata())
     assert result["should_dispatch"] is False
     assert result["reason"] == "tuple-unchanged"
 
@@ -56,14 +68,28 @@ def test_unrelated_chromium_revision_change_does_not_dispatch():
     cur = _lock()
     cur["chromium_revision"] = "chromium-b"
     cur["chromium_deps_blob"] = "deps-b"
-    result = lkgr_decision.decide(cur, _manifest())
+    result = lkgr_decision.decide(cur, _manifest(), _metadata())
     assert result["should_dispatch"] is False
 
 
 def test_force_dispatches_even_when_tuple_matches():
-    result = lkgr_decision.decide(_lock(), _manifest(), force=True)
+    result = lkgr_decision.decide(_lock(), _manifest(), _metadata(), force=True)
     assert result["should_dispatch"] is True
     assert result["reason"] == "forced"
+
+
+def test_missing_release_metadata_dispatches_matching_tuple():
+    result = lkgr_decision.decide(_lock(), _manifest())
+    assert result["should_dispatch"] is True
+    assert result["reason"] == "release-incomplete"
+
+
+def test_missing_consumer_defines_dispatches_matching_tuple():
+    metadata = _metadata()
+    metadata["manifests"][0].pop("consumer_defines")
+    result = lkgr_decision.decide(_lock(), _manifest(), metadata)
+    assert result["should_dispatch"] is True
+    assert result["reason"] == "release-incomplete"
 
 
 def test_github_output_writer():

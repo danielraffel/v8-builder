@@ -158,7 +158,8 @@ Chromium's milestone branch, selects its exact V8 SHA, and consumes the immutabl
 Skia/Dawn pins and the Skia/Dawn revisions actually built, with explicit equality flags.
 An immediate cross-repo dispatch is the fast path; a daily reconciler repairs transient
 misses. It skips only a complete exact release or an identical queued/active build, so a
-partial or failed sweep remains retryable. This lane supplies Pulp's default matched
+partial or failed sweep remains retryable. Release completeness includes all eight
+per-platform manifests and their non-empty `consumer_defines` contract. This lane supplies Pulp's default matched
 toolchain; the weekly LKGR lane remains available to consumers that want a newer V8.
 
 Each matched V8 release links to its exact [Skia/Dawn release](https://github.com/danielraffel/skia-builder/releases),

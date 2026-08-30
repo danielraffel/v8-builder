@@ -59,8 +59,13 @@ def release_is_complete(release, metadata, expected):
     manifests = metadata.get("manifests") or []
     if len(manifests) != len(EXPECTED_ASSET_PREFIXES):
         return False
-    return all(all((item.get("pair") or {}).get(key) == expected.get(key) for key in keys)
-               for item in manifests)
+    return all(
+        all((item.get("pair") or {}).get(key) == expected.get(key) for key in keys)
+        and isinstance(item.get("consumer_defines"), list)
+        and bool(item["consumer_defines"])
+        and all(isinstance(define, str) and define for define in item["consumer_defines"])
+        for item in manifests
+    )
 
 
 def _write_outputs(path, values):
