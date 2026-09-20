@@ -658,6 +658,38 @@ class V8Build:
         run(["gclient", "sync", "-D", "--force", "--reset",
              f"--revision=src/v8@{gclient_revision}"], cwd=SRC_DIR, env=self.env)
 
+    def patch_metagen_cl_mode_detection(self):
+        """Fix V8 metagen's false clang-cl detection on Apple toolchains.
+
+        M155's GN flags for iOS include absolute POSIX paths (notably the
+        simulator SDK path).  V8's metagen helper used ``startswith('/')``
+        to detect clang-cl flags, so those paths incorrectly enabled
+        ``--driver-mode=cl`` and made libclang reject the translation unit.
+        Keep the exact V8 revision while correcting the driver detection at
+        the builder boundary.
+        """
+        path = V8_DIR / "tools" / "metagen" / "compile_flags.py"
+        if not path.exists():
+            return
+        text = path.read_text(encoding="utf-8")
+        old = "  cl_mode = any(f.startswith(\"/\") for f in cflags)"
+        new = '''  # POSIX toolchains pass absolute paths (for example an iOS
+  # simulator SDK) through cflags.  Those are not clang-cl options.
+  # Detect only the slash-prefixed spellings that clang-cl actually uses.
+  _CLANG_CL_PREFIXES = (
+      "/D", "/I", "/std:", "/EH", "/GR", "/MD", "/MT", "/W",
+      "/wd", "/WX", "/Z", "/clang:", "/permissive", "/bigobj",
+      "/FS", "/fp:",
+  )
+  cl_mode = any(
+      any(flag.startswith(prefix) for prefix in _CLANG_CL_PREFIXES)
+      for flag in cflags)'''
+        if old in text:
+            path.write_text(text.replace(old, new), encoding="utf-8")
+            say("patched V8 metagen clang-cl detection for POSIX paths")
+        elif "_CLANG_CL_PREFIXES" not in text:
+            raise RuntimeError(f"unexpected metagen compile_flags.py shape: {path}")
+
     # The seal is an IN-TREE gn shared_library target (proven on macOS, P1c): it deps
     # :v8_monolith and lets gn compute V8 15.1's full Rust-Temporal + system link
     # closure, emitting a dylib/so that exports ONLY v8::/cppgc:: (force_load monolith +
@@ -1522,6 +1554,7 @@ class V8Build:
                 cwd=SRC_DIR, env=self.env)
         else:
             say("--use-synced: building current checkout (skipping tag sync)", Colors.WARN)
+        self.patch_metagen_cl_mode_detection()
         self.pin_windows_sdk_source()
         self.inject_seal_target()
         self.inject_win_validator()
