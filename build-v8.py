@@ -597,6 +597,18 @@ class V8Build:
         else:
             say("depot_tools present")
 
+        # Recent depot_tools checkouts ship their Python wrapper uninitialized.
+        # Bootstrap it before fetch/gclient/GN/Ninja actions run; otherwise fresh
+        # CI caches fail with "python3_bin_reldir.txt not found".
+        if os.name == "nt":
+            bootstrap = DEPOT_TOOLS_PATH / "update_depot_tools.bat"
+            if bootstrap.exists():
+                subprocess.run(["cmd", "/c", str(bootstrap)], env=self.env, check=True)
+        else:
+            bootstrap = DEPOT_TOOLS_PATH / "ensure_bootstrap"
+            if bootstrap.exists():
+                subprocess.run([str(bootstrap)], env=self.env, check=True)
+
     def fetch_v8(self):
         SRC_DIR.mkdir(parents=True, exist_ok=True)
         if not V8_DIR.exists():
