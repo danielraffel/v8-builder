@@ -44,6 +44,16 @@ on:
         required: false
         default: false
         type: boolean
+      replace_assets:
+        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL. Empty refuses any change to published bytes.'
+        required: false
+        default: ''
+        type: string
+      replace_reason:
+        description: 'Required with replace_assets: why the published bytes are wrong. Recorded with the old and new sha256 in the release notes.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ inputs.platforms }}
@@ -640,16 +650,55 @@ jobs:
           PY
           cat release/RELEASE_NOTES.md
           ls -la release/
+      # Consumers pin every asset by sha256 (Pulp's tools/deps/manifest.json),
+      # so re-running a version must not replace published bytes in place.
+      # tools/release_asset_guard.py skips identical assets, uploads new ones,
+      # and refuses changed ones unless replace_assets names them and
+      # replace_reason says why; a deliberate replacement prints both digests
+      # and records them in the release notes.
       - name: Create / update GitHub release
-        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPLACE_ASSETS: ${{ inputs.replace_assets }}
+          REPLACE_REASON: ${{ inputs.replace_reason }}
+          REPIN_HINT: >-
+            Pulp: in tools/deps/manifest.json, set the V8 determinism entry for
+            /releases/download/{tag}/{asset} (a release_assets url, or
+            release_metadata_sha256 for release-metadata.json) from the published sha256
+            {old} to {new}. Before repinning, confirm the digest with
+            gh api repos/danielraffel/v8-builder/releases/tags/{tag} --jq '.assets[] | select(.name == "{asset}") | .digest'
+            and read the replacement entry in that release's notes.
         shell: bash
         run: |
           set -euo pipefail
           ver="${{ steps.pkg.outputs.ver }}"
           tag="v8-${ver}"
+          if [ -n "$REPLACE_ASSETS" ] && [ -z "$(printf '%s' "$REPLACE_REASON" | tr -d '[:space:]')" ]; then
+            echo "::error::replace_assets requires replace_reason"
+            exit 1
+          fi
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" release/*.zip release/release-metadata.json \
-              --repo "${{ github.repository }}" --clobber
+            replace=()
+            if [ "$REPLACE_ASSETS" = "ALL" ]; then
+              for f in release/*.zip release/release-metadata.json; do
+                replace+=(--allow-replace "$(basename "$f")")
+              done
+            elif [ -n "$REPLACE_ASSETS" ]; then
+              IFS=',' read -r -a names <<< "$REPLACE_ASSETS"
+              for name in "${names[@]}"; do
+                name="$(printf '%s' "$name" | tr -d '[:space:]')"
+                if [ -n "$name" ]; then replace+=(--allow-replace "$name"); fi
+              done
+            fi
+            if [ "${#replace[@]}" -gt 0 ]; then
+              replace+=(--reason "$REPLACE_REASON")
+            fi
+            python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
+              publish release/*.zip release/release-metadata.json \
+              ${replace[@]+"${replace[@]}"} --repin-hint "$REPIN_HINT"
+            # Regenerated notes keep the record of any deliberate replacement.
+            python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
+              carry-ledger release/RELEASE_NOTES.md
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \

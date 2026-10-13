@@ -162,6 +162,23 @@ partial or failed sweep remains retryable. Release completeness includes all eig
 per-platform manifests and their non-empty `consumer_defines` contract. This lane supplies Pulp's default matched
 toolchain; the weekly LKGR lane remains available to consumers that want a newer V8.
 
+### Published assets are immutable
+
+Consumers pin every release asset by sha256 (Pulp's `tools/deps/manifest.json` pins all
+eight zips and `release-metadata.json`), so re-running a version never replaces published
+bytes in place. `tools/release_asset_guard.py` publishes to an existing release: identical
+assets are skipped, missing assets are uploaded, and an asset whose bytes differ is
+refused before anything is uploaded, printing the published and new sha256 and the
+consumer repin steps. V8 builds are not byte-reproducible, so a re-run of an existing,
+complete version is refused rather than silently swapped; a retry that completes a
+partially uploaded release is refused the same way for the assets already present.
+
+A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` (comma-separated
+asset file names, or `ALL`) and `replace_reason`. Only the named assets may change; the
+guard prints both digests, proves the new ones landed, and appends old and new sha256,
+the reason, the run, and the commit to an "Asset replacements" section in the release
+notes. Repin consumers in the same change.
+
 Each matched V8 release links to its exact [Skia/Dawn release](https://github.com/danielraffel/skia-builder/releases),
 and the Skia release links back to the matching V8 milestone. Treat them as one tested
 tuple, but download only the Skia/Dawn assets, V8 assets, or both that your project needs.
