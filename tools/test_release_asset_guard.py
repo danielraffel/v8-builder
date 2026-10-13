@@ -282,15 +282,97 @@ class WorkflowsUseTheGuard(unittest.TestCase):
         self.assertEqual(offenders, [], "use tools/release_asset_guard.py instead")
 
     def test_action_gh_release_never_overwrites(self):
-        import yaml
+        # A text scan rather than a YAML parse keeps this test dependency-free:
+        # each action-gh-release step must set overwrite_files: false before
+        # the next step starts.
         workflows = HERE.parent / ".github" / "workflows"
         for path in sorted(workflows.glob("*.yml")):
-            data = yaml.safe_load(path.read_text())
-            for job in (data.get("jobs") or {}).values():
-                for step in job.get("steps", []):
-                    if str(step.get("uses", "")).startswith("softprops/action-gh-release"):
-                        with self.subTest(workflow=path.name):
-                            self.assertIs(step.get("with", {}).get("overwrite_files"), False)
+            lines = path.read_text().splitlines()
+            for number, line in enumerate(lines):
+                if "uses: softprops/action-gh-release" not in line.split("#", 1)[0]:
+                    continue
+                step = []
+                for following in lines[number + 1:]:
+                    if following.lstrip().startswith("- "):
+                        break
+                    step.append(following.split("#", 1)[0].strip())
+                with self.subTest(workflow=path.name, line=number + 1):
+                    self.assertIn("overwrite_files: false", step)
+
+class ReplaceAssetsSpec(unittest.TestCase):
+    """The workflow's replace_assets input is parsed by the guard, not shell."""
+
+    NAMES = ["v8-mac-arm64-x.zip", "v8-win-x64-x.zip", "release-metadata.json"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.out = self.tmp / "out"
+        self.out.mkdir()
+        self.fake = FakeRelease(self.tmp, {name: b"old " + name.encode() for name in self.NAMES})
+        self.files = []
+        for name in self.NAMES:
+            path = self.out / name
+            path.write_bytes(b"new " + name.encode())
+            self.files.append(str(path))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def publish(self, spec, reason="toolchain fix"):
+        return self.fake.run("publish", *self.files, "--replace-assets", spec, "--reason", reason)
+
+    def test_all_with_the_right_count_replaces_every_asset_and_names_them(self):
+        result = self.publish("ALL:3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 asset(s) authorized for replacement", result.stdout)
+        for name in self.NAMES:
+            self.assertIn(f"  {name}\n", result.stdout)
+        self.assertEqual(len(self.fake.uploads()), 3)
+        self.assertEqual(len(guard.extract_ledger(self.fake.state["release"]["body"])), 3)
+
+    def test_bare_all_is_refused(self):
+        for spec in ("ALL", "all", "ALL:", "ALL:x", "ALLx"):
+            with self.subTest(spec=spec):
+                result = self.publish(spec)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ALL:<count>", result.stderr)
+                self.assertIn("publishes 3 assets", result.stderr)
+        self.assertEqual(self.fake.uploads(), [])
+
+    def test_all_with_a_wrong_count_is_refused_and_lists_the_assets(self):
+        result = self.publish("ALL:9")
+        self.assertEqual(result.returncode, 1)
+        for name in self.NAMES:
+            self.assertIn(name, result.stderr)
+        self.assertEqual(self.fake.uploads(), [])
+
+    def test_named_assets_only_cover_those_assets(self):
+        result = self.publish(" v8-win-x64-x.zip , release-metadata.json ")
+        self.assertEqual(result.returncode, 1, "the unnamed mac zip still differs")
+        self.assertIn("v8-mac-arm64-x.zip", result.stderr)
+        self.assertEqual(self.fake.uploads(), [])
+        result = self.fake.run("publish", self.files[1], self.files[2], "--replace-assets",
+                               "v8-win-x64-x.zip,release-metadata.json", "--reason", "r")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.fake.uploads()), 2)
+
+    def test_a_replacement_needs_a_reason(self):
+        result = self.publish("ALL:3", reason="   ")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requires --reason", result.stderr)
+        self.assertEqual(self.fake.uploads(), [])
+
+    def test_empty_spec_authorizes_nothing(self):
+        result = self.publish("", reason="")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("REFUSED", result.stderr)
+        self.assertEqual(self.fake.uploads(), [])
+
+    def test_workflow_hands_the_raw_input_to_the_guard(self):
+        workflow = (HERE.parent / ".github" / "workflows" / "build-v8.yml").read_text()
+        self.assertIn('--replace-assets "$REPLACE_ASSETS"', workflow)
+        self.assertNotIn("--allow-replace", workflow)
 
 
 if __name__ == "__main__":

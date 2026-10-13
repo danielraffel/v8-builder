@@ -103,6 +103,32 @@ def plan(local: dict[str, tuple[Path, str]], existing: dict[str, dict],
     return actions
 
 
+def parse_replace_spec(spec: str, published: list[str]) -> list[str]:
+    """Resolve a ``replace_assets`` value against the asset names being published.
+
+    ``spec`` is a comma-separated list of exact asset names, or ``ALL:<count>``
+    where ``count`` must equal the number of assets being published, so a
+    blanket override states its blast radius and cannot silently grow when an
+    asset is added.  An empty spec authorizes nothing.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return []
+    if spec.upper().startswith("ALL"):
+        count = spec[3:]
+        if not count.startswith(":") or not count[1:].strip().isdigit():
+            raise GuardError(f"replace_assets={spec!r}: write ALL:<count>; this release "
+                             f"publishes {len(published)} assets: {', '.join(published)}")
+        if int(count[1:]) != len(published):
+            raise GuardError(f"replace_assets={spec!r} but this release publishes "
+                             f"{len(published)} assets: {', '.join(published)}")
+        return list(published)
+    names = [name.strip() for name in spec.split(",") if name.strip()]
+    if not names:
+        raise GuardError(f"replace_assets={spec!r} names no asset")
+    return names
+
+
 def refusal_message(refused: list[Action], tag: str, repin_hint: str) -> str:
     lines = [
         f"release-asset-guard: REFUSED. {len(refused)} asset(s) on published release "
@@ -235,10 +261,6 @@ def _summary(text: str) -> None:
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
-    allow = set(args.allow_replace or [])
-    allow.discard("")
-    if allow and not (args.reason or "").strip():
-        raise GuardError("--allow-replace requires --reason: say why the published bytes are wrong.")
     local = {}
     for raw in args.files:
         path = Path(raw)
@@ -247,6 +269,17 @@ def cmd_publish(args: argparse.Namespace) -> int:
         if path.name in local:
             raise GuardError(f"two files publish as the same asset name: {path.name}")
         local[path.name] = (path, sha256_file(path))
+
+    allow = set(args.allow_replace or [])
+    allow.update(parse_replace_spec(args.replace_assets, sorted(local)))
+    allow.discard("")
+    if allow and not (args.reason or "").strip():
+        raise GuardError("replacing published assets requires --reason: "
+                         "say why the published bytes are wrong.")
+    if allow:
+        print(f"release-asset-guard: {len(allow)} asset(s) authorized for replacement on {args.tag}:")
+        for name in sorted(allow):
+            print(f"  {name}")
 
     gh = Gh(args.repo, args.gh)
     release = gh.release(args.tag)
@@ -331,7 +364,10 @@ def main(argv: list[str] | None = None) -> int:
     publish.add_argument("files", nargs="+")
     publish.add_argument("--allow-replace", action="append", default=[],
                          help="asset name whose published bytes may be replaced")
-    publish.add_argument("--reason", default="", help="required with --allow-replace")
+    publish.add_argument("--replace-assets", default="",
+                         help="comma-separated asset names, or ALL:<count> (count = assets published)")
+    publish.add_argument("--reason", default="",
+                         help="required with --allow-replace/--replace-assets")
     publish.add_argument("--dry-run", action="store_true")
     publish.add_argument("--missing-release-ok", action="store_true",
                          help="treat a missing release as empty (a new release is created later)")
