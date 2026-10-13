@@ -45,7 +45,7 @@ on:
         default: false
         type: boolean
       replace_assets:
-        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL. Empty refuses any change to published bytes.'
+        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL:<count> where count is the number of assets this release publishes (8 zips + release-metadata.json = 9). Empty refuses any change to published bytes.'
         required: false
         default: ''
         type: string
@@ -677,22 +677,44 @@ jobs:
             echo "::error::replace_assets requires replace_reason"
             exit 1
           fi
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            replace=()
-            if [ "$REPLACE_ASSETS" = "ALL" ]; then
-              for f in release/*.zip release/release-metadata.json; do
-                replace+=(--allow-replace "$(basename "$f")")
-              done
-            elif [ -n "$REPLACE_ASSETS" ]; then
+          # Replacing every asset is allowed only as ALL:<count>, where the count
+          # must equal the number of assets this run publishes, so a blanket
+          # override states its blast radius and cannot silently grow with the
+          # asset list. Every authorized name is printed before the guard runs.
+          files=(release/*.zip release/release-metadata.json)
+          replace=()
+          authorized=()
+          case "$REPLACE_ASSETS" in
+            ALL*)
+              count="${REPLACE_ASSETS#ALL:}"
+              if [ "$count" = "$REPLACE_ASSETS" ] || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+                echo "::error::replace_assets=$REPLACE_ASSETS: write ALL:<count>; this release publishes ${#files[@]} assets"
+                exit 1
+              fi
+              if [ "$count" -ne "${#files[@]}" ]; then
+                echo "::error::replace_assets=ALL:$count but this release publishes ${#files[@]} assets: $(for f in "${files[@]}"; do printf '%s ' "$(basename "$f")"; done)"
+                exit 1
+              fi
+              for f in "${files[@]}"; do authorized+=("$(basename "$f")"); done
+              ;;
+            "") ;;
+            *)
               IFS=',' read -r -a names <<< "$REPLACE_ASSETS"
               for name in "${names[@]}"; do
                 name="$(printf '%s' "$name" | tr -d '[:space:]')"
-                if [ -n "$name" ]; then replace+=(--allow-replace "$name"); fi
+                if [ -n "$name" ]; then authorized+=("$name"); fi
               done
-            fi
-            if [ "${#replace[@]}" -gt 0 ]; then
-              replace+=(--reason "$REPLACE_REASON")
-            fi
+              ;;
+          esac
+          if [ "${#authorized[@]}" -gt 0 ]; then
+            echo "replace_assets authorizes ${#authorized[@]} asset(s) on $tag:"
+            for name in "${authorized[@]}"; do
+              echo "  $name"
+              replace+=(--allow-replace "$name")
+            done
+            replace+=(--reason "$REPLACE_REASON")
+          fi
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
               publish release/*.zip release/release-metadata.json \
               ${replace[@]+"${replace[@]}"} --repin-hint "$REPIN_HINT"

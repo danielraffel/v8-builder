@@ -173,8 +173,11 @@ consumer repin steps. V8 builds are not byte-reproducible, so a re-run of an exi
 complete version is refused rather than silently swapped; a retry that completes a
 partially uploaded release is refused the same way for the assets already present.
 
-A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` (comma-separated
-asset file names, or `ALL`) and `replace_reason`. Only the named assets may change; the
+A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` and
+`replace_reason`. `replace_assets` is a comma-separated list of exact asset file names,
+or `ALL:<count>` for a full re-version, where the count must equal the number of assets
+the run publishes (8 zips plus `release-metadata.json`, so `ALL:9`); a wrong or missing
+count is refused, and every authorized name is printed. Only the named assets may change; the
 guard prints both digests, proves the new ones landed, and appends old and new sha256,
 the reason, the run, and the commit to an "Asset replacements" section in the release
 notes. Repin consumers in the same change.

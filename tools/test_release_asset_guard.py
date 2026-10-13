@@ -47,6 +47,8 @@ FAKE_GH = textwrap.dedent(r'''
         existing = [a for a in rel["assets"] if a["name"] == name]
         if existing and "--clobber" not in args:
             save(); sys.stderr.write("asset under the same name already exists\n"); sys.exit(1)
+        if os.environ.get("FAKE_GH_UPLOAD_DOES_NOT_LAND"):
+            save(); sys.exit(0)  # gh reports success but the release keeps the old bytes
         rel["assets"] = [a for a in rel["assets"] if a["name"] != name]
         rel["assets"].append({"name": name, "id": 900 + len(state["calls"]),
                               "digest": "sha256:" + digest})
@@ -90,9 +92,9 @@ class FakeRelease:
     def uploads(self) -> list[list[str]]:
         return [c for c in self.state["calls"] if c[:2] == ["release", "upload"]]
 
-    def run(self, *args: str) -> subprocess.CompletedProcess:
+    def run(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
         env = dict(os.environ, FAKE_GH_STATE=str(self.state_path),
-                   GITHUB_STEP_SUMMARY=str(self.tmp / "summary.md"))
+                   GITHUB_STEP_SUMMARY=str(self.tmp / "summary.md"), **extra_env)
         for key in ("GITHUB_RUN_ID", "GITHUB_SHA"):
             env.pop(key, None)
         return subprocess.run(
@@ -172,6 +174,21 @@ class GuardEndToEnd(unittest.TestCase):
         self.assertIn(sha(b"second build"), ledger[0])
         self.assertIn("rebuilt after a toolchain fix", ledger[0])
         self.assertIn("Release asset replaced", (self.tmp / "summary.md").read_text())
+
+    def test_replacement_that_does_not_land_fails_and_records_nothing(self):
+        # gh can report success while the release still serves the old bytes
+        # (a stale upload, a race with another writer).  The guard must re-read
+        # the release and refuse to record a replacement it cannot see.
+        name = "a.zip"
+        fake = FakeRelease(self.tmp, {name: b"old"}, body="notes\n")
+        result = fake.run("publish", self.local(name, b"new"), "--allow-replace", name,
+                          "--reason", "r", FAKE_GH_UPLOAD_DOES_NOT_LAND="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("expected sha256:" + sha(b"new"), result.stderr)
+        self.assertEqual(len(fake.uploads()), 1)
+        reads = [c for c in fake.state["calls"] if c[0] == "api" and "/releases/tags/" in c[1]]
+        self.assertEqual(len(reads), 2, "the release must be re-read after the replacement")
+        self.assertEqual(guard.extract_ledger(fake.state["release"]["body"]), [])
 
     def test_override_requires_reason(self):
         name = "a.zip"
