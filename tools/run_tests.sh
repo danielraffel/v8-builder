@@ -31,6 +31,7 @@ TESTS=(
   tools/test_matched_release.py
   tools/test_milestone_pin.py
   tools/test_lean_packaging.py
+  tools/test_release_asset_guard.py
 )
 
 fail=0

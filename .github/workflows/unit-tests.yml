@@ -1,0 +1,33 @@
+name: Unit tests
+
+# Runs the seal-audit, release-gate, and release-asset-guard unit tests on
+# every PR that can change them. Pure Python; no V8 build.
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - 'seal/**'
+      - '.github/scripts/**'
+      - '.github/workflows/**'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - 'seal/**'
+      - '.github/scripts/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: pip install pyyaml
+      - run: bash tools/run_tests.sh
