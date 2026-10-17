@@ -687,7 +687,15 @@ class V8Build:
         if old in text:
             path.write_text(text.replace(old, new), encoding="utf-8")
             say("patched V8 metagen clang-cl detection for POSIX paths")
-        elif "_CLANG_CL_PREFIXES" not in text:
+        elif "_CLANG_CL_PREFIXES" in text:
+            say("V8 metagen clang-cl detection already patched")
+        elif "cl_mode" not in text:
+            # Newer V8 revisions pass compile flags verbatim and no longer
+            # contain the legacy heuristic this compatibility patch targets.
+            # Treat that upstream fix as already applied instead of rejecting
+            # the revision merely because its helper changed shape.
+            say("V8 metagen has no legacy clang-cl heuristic; no patch needed")
+        else:
             raise RuntimeError(f"unexpected metagen compile_flags.py shape: {path}")
 
     # The seal is an IN-TREE gn shared_library target (proven on macOS, P1c): it deps
