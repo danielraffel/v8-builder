@@ -120,6 +120,10 @@ jobs:
 
   build-v8:
     needs: resolve-runners
+    # Do not allocate runners for unrelated cells during focused recovery runs.
+    # The portable linux/x64 cell has its own job below; it remains independently
+    # gated there because it also runs for `all`.
+    if: ${{ inputs.platforms == 'all' || contains(inputs.platforms, format('{0}/{1}', matrix.platform, matrix.arch)) }}
     strategy:
       fail-fast: false
       matrix:
