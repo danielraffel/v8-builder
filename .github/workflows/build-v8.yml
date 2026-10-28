@@ -489,6 +489,8 @@ jobs:
           # over-constrained qualifier in the probe's private header copy.
           sed -i 's/constexpr std::span<std::uint8_t const>/std::span<std::uint8_t const>/' \
             build/src/v8/include/v8-wasm.h
+          sed -i 's/constexpr std::span<const uint8_t>/std::span<const uint8_t>/' \
+            build/src/v8/include/v8-wasm.h
           sed -i 's/constexpr std::span<const unsigned char>/std::span<const unsigned char>/' \
             build/src/v8/include/v8-wasm.h
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
