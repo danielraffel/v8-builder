@@ -483,6 +483,14 @@ jobs:
           for z in skia/*.zip; do unzip -o "$z" -d skia; done
           VER="$(python3 -c "import json;print(json.load(open('build/linux-x64/manifest.json'))['v8_version'])")"
           V8_DEFINES="$(python3 -c 'import json; print(";".join(json.load(open("build/linux-x64/manifest.json"))["consumer_defines"]))')"
+          # GCC 12's libstdc++ does not provide constexpr unique_ptr::get(),
+          # while this V8 revision's public v8-wasm.h marks the wrapper constexpr.
+          # The coexistence probe does not exercise WebAssembly; remove only that
+          # over-constrained qualifier in the probe's private header copy.
+          sed -i 's/constexpr std::span<std::uint8_t const>/std::span<std::uint8_t const>/' \
+            build/src/v8/include/v8-wasm.h
+          sed -i 's/constexpr std::span<const unsigned char>/std::span<const unsigned char>/' \
+            build/src/v8/include/v8-wasm.h
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
           cmake -S validate -B validate/build \
             -DCMAKE_C_COMPILER=gcc-12 \
