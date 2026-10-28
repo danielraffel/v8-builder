@@ -485,6 +485,8 @@ jobs:
           V8_DEFINES="$(python3 -c 'import json; print(";".join(json.load(open("build/linux-x64/manifest.json"))["consumer_defines"]))')"
           SKIA_LIBDIR="$(cd "$(dirname "$(find skia -name 'libskunicode_icu.a' | head -1)")" && pwd)"
           cmake -S validate -B validate/build \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_CXX_COMPILER=g++-12 \
             -DV8_INCLUDE_DIR="$PWD/build/src/v8/include" \
             -DV8_LIBRARY_PATH="$PWD/build/linux-x64/lib/libv8.so" \
             -DSKIA_DIR="$SKIA_LIBDIR" \
