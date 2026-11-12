@@ -26,7 +26,7 @@
 # WHERE THIS RUNS: a native x86_64 Linux host. In CI that is the ubuntu-24.04
 # runner executing this rockylinux:8 container (.github/workflows/build-v8-rhel8.yml).
 # Locally it needs an x86_64 Docker host (the arm64 Mac emulates x86_64 slowly).
-FROM rockylinux:8
+FROM rockylinux@sha256:9794037624aaa6212aeada1d28861ef5e0a935adaf93e4ef79837119f2a2d04c # rockylinux:8
 
 # Core build deps for depot_tools / gn / ninja + V8 monolith.
 #   git, python3        — depot_tools, gclient, build-v8.py
