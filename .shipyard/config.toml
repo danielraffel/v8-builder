@@ -1,0 +1,7 @@
+[auto_merge]
+reviewer_signers = ["pulp-review", "infra-review2"]
+reviewer_stamp_sessions = ["fleet-pass-reviewer-*"]
+fleet_review_required = true
+
+[validation]
+pr_gates = false
