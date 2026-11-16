@@ -9,6 +9,8 @@ on:
       - 'seal/**'
       - '.github/scripts/**'
       - '.github/workflows/**'
+      - '.github/CODEOWNERS'
+      - '.shipyard/config.toml'
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - 'seal/**'
       - '.github/scripts/**'
       - '.github/workflows/**'
+      - '.github/CODEOWNERS'
+      - '.shipyard/config.toml'
   workflow_dispatch:
 
 permissions:

@@ -1,0 +1,23 @@
+# A review and a merge-queue build both run the pull request's (or the
+# queue's) own copy of their workflow, so this one does nothing and holds no
+# permissions. Its completion starts "Release path review" through
+# workflow_run, which runs the default branch's definition. A queued copy that
+# drops this workflow posts nothing, and the queue ejects the entry when the
+# required status never arrives.
+name: Release path review trigger
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  merge_group:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Hand the event to Release path review
+        run: 'true'
