@@ -45,7 +45,7 @@ on:
         default: false
         type: boolean
       replace_assets:
-        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL:<count> where count is the number of assets this release publishes (8 zips + release-metadata.json = 9). Empty refuses any change to published bytes.'
+        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL:<count> where count is the number of assets this release publishes (8 zips, each with a legal manifest, a toolchain receipt and an attestation bundle, plus release-metadata.json = 33). Empty refuses any change to published bytes.'
         required: false
         default: ''
         type: string
@@ -54,14 +54,88 @@ on:
         required: false
         default: ''
         type: string
+      release_tag:
+        description: 'Attested re-cut only: v8-<id>-attested.<n>. Rebuilds the V8 revision, pair and Skia validation release recorded in v8-<id> and publishes them as a new release; it never touches v8-<id>. Empty publishes under v8-<id>.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ inputs.platforms }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ inputs.platforms }}-${{ inputs.release_tag }}
   cancel-in-progress: false
+# Read-only by default. Only create-release writes to a release (and only
+# from main); only attest holds the OIDC grant, and it runs no V8 code.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # Decides what this run builds and where it may publish. A plain run passes
+  # the dispatch inputs through. An attested re-cut (release_tag
+  # v8-<id>-attested.<n>) takes the V8 revision, the pair lock and the Skia
+  # validation release from v8-<id>'s release-metadata.json, so it rebuilds
+  # exactly what that release names.
+  resolve-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      v8_version: ${{ steps.r.outputs.v8_version }}
+      v8_revision: ${{ steps.r.outputs.v8_revision }}
+      lkgr_lock_b64: ${{ steps.r.outputs.lkgr_lock_b64 }}
+      skia_release_tag: ${{ steps.r.outputs.skia_release_tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKIP_RELEASE: ${{ inputs.skip_release }}
+          PLATFORMS: ${{ inputs.platforms }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPLACE_ASSETS: ${{ inputs.replace_assets }}
+          V8_VERSION: ${{ inputs.v8_version }}
+          V8_REVISION: ${{ inputs.v8_revision }}
+          LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
+          SKIA_RELEASE_TAG: ${{ inputs.skia_release_tag }}
+        run: |
+          set -euo pipefail
+          # Only main may write to a release. create-release carries the same
+          # condition; failing here says so before a two-hour build instead of
+          # silently skipping the publish at the end of it.
+          if [ "$SKIP_RELEASE" != "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::publishing a release is allowed only from main (this run is $GITHUB_REF); dispatch from main, or set skip_release"
+            exit 1
+          fi
+          if [ -z "$RELEASE_TAG" ]; then
+            {
+              echo "v8_version=$V8_VERSION"
+              echo "v8_revision=$V8_REVISION"
+              echo "lkgr_lock_b64=$LKGR_LOCK_B64"
+              echo "skia_release_tag=$SKIA_RELEASE_TAG"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="$(python3 -c 'import re,sys; m=re.match(r"^(v8-.+)-attested\.[1-9][0-9]*$", sys.argv[1]); print(m.group(1) if m else "")' "$RELEASE_TAG")"
+          if [ -z "$base" ]; then
+            echo "::error::release_tag=$RELEASE_TAG must be v8-<id>-attested.<n>"
+            exit 1
+          fi
+          if [ "$PLATFORMS" != "all" ] && [ "$SKIP_RELEASE" != "true" ]; then
+            echo "::error::an attested re-cut publishes every platform; set platforms=all"
+            exit 1
+          fi
+          if [ -n "$REPLACE_ASSETS" ]; then
+            echo "::error::an attested re-cut is a new release; replace_assets does not apply"
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::$RELEASE_TAG already exists; an attested re-cut never replaces a release"
+            exit 1
+          fi
+          mkdir -p base
+          gh release download "$base" --repo "$GITHUB_REPOSITORY" --pattern release-metadata.json --dir base
+          python3 tools/recut_inputs.py base/release-metadata.json --skia-release-tag "$SKIA_RELEASE_TAG" \
+            >> "$GITHUB_OUTPUT"
+
   # ── Resolve runners ─────────────────────────────────────────────────────────────────
   # GitHub-hosted by DEFAULT so a fork builds with zero setup. If you have your own
   # (faster) runners, opt in by setting repo VARIABLES (Settings → Secrets and variables →
@@ -119,7 +193,7 @@ jobs:
           echo "resolved → macOS=$MAC  linux/arm64=$LARM"
 
   build-v8:
-    needs: resolve-runners
+    needs: [resolve-runners, resolve-release]
     strategy:
       fail-fast: false
       matrix:
@@ -239,15 +313,15 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ github.run_id }}
+          key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-
+            ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-
             ccache-${{ matrix.platform }}-${{ matrix.arch }}-
       - name: Decode LKGR lock
-        if: steps.sel.outputs.go == 'true' && inputs.lkgr_lock_b64 != ''
+        if: steps.sel.outputs.go == 'true' && needs.resolve-release.outputs.lkgr_lock_b64 != ''
         shell: bash
         env:
-          LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
+          LKGR_LOCK_B64: ${{ needs.resolve-release.outputs.lkgr_lock_b64 }}
         run: |
           set -euo pipefail
           mkdir -p build
@@ -257,9 +331,9 @@ jobs:
         if: steps.sel.outputs.go == 'true'
         shell: bash
         env:
-          V8_VERSION: ${{ inputs.v8_version }}
-          V8_REVISION: ${{ inputs.v8_revision }}
-          SKIA_RELEASE_TAG: ${{ inputs.skia_release_tag }}
+          V8_VERSION: ${{ needs.resolve-release.outputs.v8_version }}
+          V8_REVISION: ${{ needs.resolve-release.outputs.v8_revision }}
+          SKIA_RELEASE_TAG: ${{ needs.resolve-release.outputs.skia_release_tag }}
         run: |
           set -euo pipefail
           extra=()
@@ -289,7 +363,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p skia && cd skia
-          gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+          gh release download "${{ needs.resolve-release.outputs.skia_release_tag }}" --repo danielraffel/skia-builder \
             --pattern "*${{ matrix.platform }}*${{ matrix.arch }}*release*.zip"
           for z in *.zip; do unzip -o "$z"; done
         env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
@@ -333,6 +407,17 @@ jobs:
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build
           "${PRE[@]}" ./validate/build/v8_skia_validate
+      # The archive is written here, next to the toolchain and the ninja
+      # graph that produced it, so its legal manifest and toolchain receipt
+      # are written against the exact bytes a release publishes. A record
+      # that does not prove what it claims is kept for diagnosis under
+      # provenance/, and the prove step after the uploads fails the job.
+      - name: Package archive and write provenance records
+        if: steps.sel.outputs.go == 'true'
+        shell: bash
+        env:
+          V8_VERSION: ${{ needs.resolve-release.outputs.v8_version }}
+        run: bash tools/cell_provenance.sh write "${{ matrix.cell }}" "${{ matrix.platform }}" "${{ matrix.arch }}"
       - name: Upload artifact
         # Use matrix.cell, not <platform>-<arch>: iOS writes build/ios-<env>-<arch>
         # (e.g. build/ios-simulator-arm64) because it carries a second (env) axis. For the
@@ -342,6 +427,24 @@ jobs:
         with:
           name: v8-${{ matrix.cell }}
           path: build/${{ matrix.cell }}
+      - name: Upload release package
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-v8-${{ matrix.cell }}
+          path: package/
+          if-no-files-found: error
+      - name: Upload provenance diagnostics
+        if: always() && steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provenance-v8-${{ matrix.cell }}
+          path: provenance/
+          if-no-files-found: warn
+      - name: Prove provenance records
+        if: steps.sel.outputs.go == 'true'
+        shell: bash
+        run: bash tools/cell_provenance.sh prove
 
   # Portable Linux x64 V8, built in an Ubuntu 22.04 container so the sealed libv8.so carries
   # a glibc 2.34 / GLIBCXX 3.4.30 floor (Ubuntu 22.04 with current updates, Debian 12+).
@@ -353,6 +456,7 @@ jobs:
   # (with an internal Select gate) so a mac-only dispatch doesn't skip-block validate-all.
   # (arm64 stays the leaky matrix cell — portable-linux-arm64 is the tracked follow-up.)
   portable-linux-x64:
+    needs: resolve-release
     runs-on: ubuntu-24.04
     container:
       image: ubuntu@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c # ubuntu:22.04
@@ -407,14 +511,14 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-portable-linux-x64-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-${{ github.run_id }}
+          key: ccache-portable-linux-x64-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-${{ github.run_id }}
           restore-keys: |
-            ccache-portable-linux-x64-${{ inputs.v8_revision || inputs.v8_version || 'synced' }}-
+            ccache-portable-linux-x64-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-
             ccache-portable-linux-x64-
       - name: Decode LKGR lock
-        if: steps.sel.outputs.go == 'true' && inputs.lkgr_lock_b64 != ''
+        if: steps.sel.outputs.go == 'true' && needs.resolve-release.outputs.lkgr_lock_b64 != ''
         env:
-          LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
+          LKGR_LOCK_B64: ${{ needs.resolve-release.outputs.lkgr_lock_b64 }}
         run: |
           set -euo pipefail
           mkdir -p build
@@ -425,9 +529,9 @@ jobs:
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
-          V8_VERSION: ${{ inputs.v8_version }}
-          V8_REVISION: ${{ inputs.v8_revision }}
-          SKIA_RELEASE_TAG: ${{ inputs.skia_release_tag }}
+          V8_VERSION: ${{ needs.resolve-release.outputs.v8_version }}
+          V8_REVISION: ${{ needs.resolve-release.outputs.v8_revision }}
+          SKIA_RELEASE_TAG: ${{ needs.resolve-release.outputs.skia_release_tag }}
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 4G
         run: |
@@ -473,7 +577,7 @@ jobs:
           set -euo pipefail
           mkdir -p skia && cd skia
           SKIP_SKIA=0
-          gh release download "${{ inputs.skia_release_tag }}" --repo danielraffel/skia-builder \
+          gh release download "${{ needs.resolve-release.outputs.skia_release_tag }}" --repo danielraffel/skia-builder \
             --pattern '*linux*x64*release*.zip' || SKIP_SKIA=1
           cd "$GITHUB_WORKSPACE"
           if [ "$SKIP_SKIA" = "1" ]; then
@@ -504,12 +608,36 @@ jobs:
             -DEXPECTED_V8_VERSION="$VER"
           cmake --build validate/build
           ./validate/build/v8_skia_validate
+      - name: Package archive and write provenance records
+        if: steps.sel.outputs.go == 'true'
+        env:
+          V8_VERSION: ${{ needs.resolve-release.outputs.v8_version }}
+        run: |
+          bash tools/cell_provenance.sh write linux-x64 linux x64 \
+            "ubuntu@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c"
       - name: Upload artifact
         if: steps.sel.outputs.go == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: v8-linux-x64
           path: build/linux-x64
+      - name: Upload release package
+        if: steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkg-v8-linux-x64
+          path: package/
+          if-no-files-found: error
+      - name: Upload provenance diagnostics
+        if: always() && steps.sel.outputs.go == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provenance-v8-linux-x64
+          path: provenance/
+          if-no-files-found: warn
+      - name: Prove provenance records
+        if: steps.sel.outputs.go == 'true'
+        run: bash tools/cell_provenance.sh prove
 
   validate-all:
     # Intra-repo single-V8-SHA gate (task #29): every per-platform artifact in a sweep
@@ -520,147 +648,112 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with: { path: artifacts }
+        with: { path: artifacts, pattern: 'v8-*' }
       - name: Single-SHA gate (no mixed-revision release)
         run: python3 tools/check_single_sha.py artifacts
 
+  # The build jobs run V8's DEPS-fetched third-party code, so none of them
+  # holds an OIDC grant. This job runs no V8 code: it collects the packages
+  # each build already proved with --check, proves them again, writes
+  # release-metadata.json and the notes, and signs one build-provenance
+  # attestation over every archive, record and the metadata, so a consumer
+  # can verify which workflow, ref and commit produced them. A release asset
+  # digest alone proves only that the bytes did not change after upload.
+  # Runs for test dispatches too, so a skip_release run exercises it.
+  attest:
+    needs: [resolve-release, validate-all]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      release_id: ${{ steps.assemble.outputs.release_id }}
+      title: ${{ steps.assemble.outputs.title }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: pkg-v8-*
+          path: release
+          merge-multiple: true
+      - name: Prove every package and assemble the release
+        id: assemble
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          V8_VERSION: ${{ needs.resolve-release.outputs.v8_version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for archive in release/*.zip; do
+            stem="${archive%.zip}"
+            receipts=("$stem".*-toolchain.sha256-*.json)
+            manifests=("$stem".legal-manifest.sha256-*.json)
+            if [ ${#receipts[@]} -ne 1 ] || [ ${#manifests[@]} -ne 1 ]; then
+              echo "::error::$archive does not have exactly one toolchain receipt and one legal manifest"
+              exit 1
+            fi
+            python3 tools/write_toolchain_receipt.py "${receipts[0]}" --archive "$archive" --check
+            python3 tools/write_legal_manifest.py "${manifests[0]}" --archive "$archive" --check
+          done
+          complete=()
+          [ "$PLATFORMS" = "all" ] && complete=(--complete)
+          python3 tools/assemble_release.py release ${complete[@]+"${complete[@]}"} \
+            --v8-version "$V8_VERSION" | tee -a "$GITHUB_OUTPUT"
+          (cd release && sha256sum -- *.zip *.json) > subjects.sha256
+          cat subjects.sha256
+          cat release/RELEASE_NOTES.md
+      - name: Attest archives, provenance records and release metadata
+        id: attest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: subjects.sha256
+      # The Sigstore bundle lets a consumer verify offline. Each archive gets a
+      # copy named after it and the bundle's own sha256.
+      - name: Keep the attestation bundle per archive
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          digest="$(sha256sum "$BUNDLE" | cut -d' ' -f1)"
+          for archive in release/*.zip; do
+            stem="$(basename "$archive" .zip)"
+            cp "$BUNDLE" "release/${stem}.provenance-attestation.sha256-${digest}.sigstore.json"
+          done
+          ls -la release
+      - name: Upload the release set
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-set
+          path: release/
+          if-no-files-found: error
+
   create-release:
-    needs: validate-all
-    if: ${{ !inputs.skip_release && inputs.platforms == 'all' }}
+    needs: [resolve-release, attest]
+    if: ${{ !inputs.skip_release && inputs.platforms == 'all' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with: { path: artifacts }
-      - name: Package per-platform zips + release notes
+        with:
+          name: release-set
+          path: release
+      - name: Resolve the publish tag
         id: pkg
-        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.attest.outputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          mkdir -p release
-          python3 - > release/meta.json <<'PY'
-          import glob, json, re
-          first = json.load(open(sorted(glob.glob('artifacts/**/manifest.json', recursive=True))[0]))
-          version = first.get("v8_version") or "unknown"
-          pair = first.get("pair") or {}
-          def clean(s):
-              return re.sub(r"[^0-9A-Za-z._-]+", "-", s).strip("-")
-          if pair.get("pair_kind") == "chromium-milestone" and pair.get("v8"):
-              release_id = clean(f"m{pair['milestone']}-{version}-{pair['v8'][:12]}")
-              title = f"M{pair['milestone']} matched V8 {version} ({pair['v8'][:12]})"
-          elif pair.get("pair_kind") == "chromium-lkgr" and pair.get("v8"):
-              release_id = clean(f"{version}-lkgr-{pair['v8'][:12]}")
-              title = f"V8 {version} (Chromium LKGR {pair['v8'][:12]})"
-          else:
-              release_id = clean("${{ inputs.v8_version }}" or version)
-              title = f"V8 {version}"
-          print(json.dumps({
-              "release_id": release_id,
-              "display_version": version,
-              "title": title,
-              "pair": pair,
-          }, indent=2))
-          PY
-          release_id="$(python3 -c "import json;print(json.load(open('release/meta.json'))['release_id'])")"
-          display_version="$(python3 -c "import json;print(json.load(open('release/meta.json'))['display_version'])")"
-          title="$(python3 -c "import json;print(json.load(open('release/meta.json'))['title'])")"
-          echo "ver=$release_id" >> "$GITHUB_OUTPUT"
-          echo "title=$title" >> "$GITHUB_OUTPUT"
-          for d in artifacts/v8-*; do
-            [ -d "$d" ] || continue
-            name="$(basename "$d")"                 # v8-<platform>-<arch>
-            # validate/ is the android + win-arm64 offline harness (cross-built validator
-            # + a co-located lib copy). It rides along in the UPLOADED artifact so the
-            # separate emulator/VM validation step can run it AFTER the build — but a
-            # release consumer never needs it, and it duplicates the shipped lib. Exclude
-            # it (and any stray macOS metadata) from the release zip so each artifact
-            # contains ONLY the lean, required entries.
-            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}-${release_id}.zip" . \
-                -x 'validate/*' -x '*/.DS_Store' -x '__MACOSX/*' )
-          done
-          python3 - <<'PY'
-          import glob, json, os
-          expected = {
-              'v8-mac-arm64', 'v8-mac-x86_64', 'v8-linux-arm64', 'v8-linux-x64',
-              'v8-win-x64', 'v8-win-arm64', 'v8-android-arm64',
-              'v8-ios-simulator-arm64',
-          }
-          zips = sorted(os.path.basename(p) for p in glob.glob('release/*.zip'))
-          missing = sorted(prefix for prefix in expected
-                           if not any(name.startswith(prefix + '-') for name in zips))
-          if len(zips) != len(expected) or missing:
-              raise SystemExit(f'incomplete release assets: count={len(zips)} missing={missing}')
-          manifests = []
-          for path in sorted(glob.glob('artifacts/**/manifest.json', recursive=True)):
-              data = json.load(open(path))
-              defines = data.get('consumer_defines')
-              if (not isinstance(defines, list) or not defines or
-                      any(not isinstance(item, str) or not item for item in defines)):
-                  raise SystemExit(f'missing consumer_defines in {path}')
-              # Preserve the complete per-platform manifest.  Selectively copying fields
-              # here previously dropped consumer_defines from release-metadata.json even
-              # though every archive carried the correct manifest.json.
-              manifests.append(data)
-          if len(manifests) != len(expected):
-              raise SystemExit(f'incomplete release manifests: {len(manifests)}')
-          pair = json.load(open('release/meta.json')).get('pair') or {}
-          json.dump({'schema': 1, 'assets': zips, 'pair': pair, 'manifests': manifests},
-                    open('release/release-metadata.json', 'w'), indent=2)
-          PY
-          python3 - "$display_version" release/meta.json > release/RELEASE_NOTES.md <<'PY'
-          import json, glob, sys
-          ver = sys.argv[1]
-          meta = json.load(open(sys.argv[2]))
-          pair0 = meta.get("pair") or {}
-          ms = sorted(glob.glob('artifacts/**/manifest.json', recursive=True))
-          print(f"**V8 {ver}** — a sealed, embeddable, shared V8 that coexists with "
-                f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
-                f"`Intl` on. See the README for the ABI/consumer contract.\n")
-          if pair0.get("pair_kind") == "chromium-milestone":
-              skia_release = pair0.get("skia_release_tag") or pair0.get("validated_skia_release")
-              if skia_release:
-                  print(f"**Matched Skia/Dawn release:** "
-                        f"[{skia_release}](https://github.com/danielraffel/skia-builder/releases/tag/{skia_release})  ")
-                  print("Use either release independently, or both as the matched toolchain.\n")
-              print(f"Chromium M{pair0.get('milestone', '?')} branch tuple:")
-              print(f"- Chromium branch: `{pair0.get('chromium_branch', 'unknown')}`")
-              print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
-              print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")
-              print(f"- Skia: `{pair0.get('skia', 'unknown')}`")
-              print(f"- Skia actually built: `{pair0.get('built_skia', 'unknown')}`")
-              print(f"- Skia pin identical: `{pair0.get('skia_matches_chromium', False)}`")
-              print(f"- V8: `{pair0.get('v8', 'unknown')}`")
-              print(f"- Chromium Dawn: `{pair0.get('dawn', 'unknown')}`")
-              print(f"- Skia-built Dawn: `{pair0.get('built_dawn', 'unknown')}`")
-              print(f"- Dawn pins identical: `{pair0.get('dawn_matches_chromium', False)}`\n")
-          elif pair0.get("pair_kind") == "chromium-lkgr":
-              print("Chromium LKGR tuple:")
-              print(f"- Chromium revision: `{pair0.get('chromium_revision', 'unknown')}`")
-              print(f"- DEPS blob: `{pair0.get('chromium_deps_blob', 'unknown')}`")
-              print(f"- Skia: `{pair0.get('skia', 'unknown')}`")
-              print(f"- V8: `{pair0.get('v8', 'unknown')}`")
-              print(f"- Dawn: `{pair0.get('dawn', 'unknown')}`\n")
-          print("| platform | arch | v8 | sealed | source | validation Skia |")
-          print("|---|---|---|---|---|---|")
-          for m in ms:
-              d = json.load(open(m)); p = d.get("pair", {}) or {}
-              skia = p.get("validated_skia_release") or p.get("skia_release") or "—"
-              source = p.get("pair_kind") or p.get("source") or "manual"
-              plat = d.get('platform')
-              # iOS carries an env axis (device|simulator) and validates via the macho seal
-              # audit + Simulator ODR gate, not the Skia cmake harness — surface both.
-              if plat == 'ios':
-                  plat = f"ios ({d.get('ios_environment', '?')})"
-                  skia = 'seal+ODR gate'
-              print(f"| {plat} | {d.get('arch')} | {d.get('v8_version')} | "
-                    f"{'yes' if d.get('sealed') else 'NO'} | {source} | {skia} |")
-          print("\nEvery artifact in this release names the same V8 revision "
-                "(single-SHA gate). Each is build + seal-audited (0 ICU/zlib/Abseil "
-                "exports) + identity-checked (no skip-pass).")
-          PY
-          cat release/RELEASE_NOTES.md
+          python3 tools/release_naming.py tag "$RELEASE_ID" "$RELEASE_TAG" > tag.env
+          cat tag.env
+          echo "tag=$(sed -n 's/^publish=//p' tag.env)" >> "$GITHUB_OUTPUT"
           ls -la release/
       # Consumers pin every asset by sha256 (Pulp's tools/deps/manifest.json),
       # so re-running a version must not replace published bytes in place.
@@ -671,6 +764,9 @@ jobs:
       - name: Create / update GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          TITLE: ${{ needs.attest.outputs.title }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           REPLACE_ASSETS: ${{ inputs.replace_assets }}
           REPLACE_REASON: ${{ inputs.replace_reason }}
           REPIN_HINT: >-
@@ -683,13 +779,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ver="${{ steps.pkg.outputs.ver }}"
-          tag="v8-${ver}"
+          tag="$TAG"
+          title="$TITLE"
+          # Every archive ships with its legal manifest, toolchain receipt and
+          # attestation bundle; *.json covers those records and the metadata.
+          assets=(release/*.zip release/*.json)
+          if [ -n "$RELEASE_TAG" ]; then
+            # An attested re-cut is always a new release (resolve-release
+            # refused an existing tag before the build; refuse a race here).
+            if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "::error::$tag already exists; an attested re-cut never replaces a release"
+              exit 1
+            fi
+            title="$title, attested re-cut ${tag##*-attested.}"
+          fi
           # replace_assets (names, or ALL:<count>) and replace_reason are
           # validated by the guard itself; see tools/release_asset_guard.py.
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
-              publish release/*.zip release/release-metadata.json \
+              publish "${assets[@]}" \
               --replace-assets "$REPLACE_ASSETS" --reason "$REPLACE_REASON" \
               --repin-hint "$REPIN_HINT"
             # Regenerated notes keep the record of any deliberate replacement.
@@ -698,9 +806,9 @@ jobs:
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \
-              --title "${{ steps.pkg.outputs.title }}" \
+              --title "$title" \
               --notes-file release/RELEASE_NOTES.md \
-              release/*.zip release/release-metadata.json
+              "${assets[@]}"
           fi
           gh release view "$tag" --repo "${{ github.repository }}" --json tagName,assets \
             --jq '{tag:.tagName, assets:[.assets[].name]}'

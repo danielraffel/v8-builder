@@ -32,6 +32,7 @@ TESTS=(
   tools/test_milestone_pin.py
   tools/test_lean_packaging.py
   tools/test_release_asset_guard.py
+  tools/test_provenance.py
 )
 
 fail=0
