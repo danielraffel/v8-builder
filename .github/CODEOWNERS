@@ -29,3 +29,5 @@
 /tools/run_tests.sh @danielraffel
 /tools/lkgr_decision.py @danielraffel
 /tools/http_retry.py @danielraffel
+/tools/rhel8/check_glibc_floor.py @danielraffel
+/tools/check_glibcxx_floor.py @danielraffel

@@ -4,6 +4,13 @@
 # workflow_run, which runs the default branch's definition. A queued copy that
 # drops this workflow posts nothing, and the queue ejects the entry when the
 # required status never arrives.
+#
+# On a review, the workflow_run's head_sha is the pull request's head commit,
+# not the synthetic merge commit the workflow itself runs on: GitHub reports a
+# pull-request-event run's head_sha as the head of the branch (checked against
+# the runs of this trigger in Generous-Corp/vellum, where head_sha equals the
+# pull request's head). The rule therefore judges and posts on the real head,
+# so a changes-requested review replaces an earlier success.
 name: Release path review trigger
 
 on:
