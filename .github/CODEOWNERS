@@ -1,0 +1,33 @@
+# Release path: a pull request that changes any file listed here, or any
+# workflow or local action, needs two counted reviewer APPROVEs of its exact
+# head (the `release-path-review` status, .github/workflows/release-path-review.yml).
+# Entries must be anchored file paths: the rule refuses globs and directories.
+/.github/CODEOWNERS @danielraffel
+/.shipyard/config.toml @danielraffel
+/.github/workflows/review-verdict.yml @danielraffel
+/.github/workflows/review-verdict-trigger.yml @danielraffel
+/.github/workflows/release-path-review.yml @danielraffel
+/.github/workflows/release-path-review-trigger.yml @danielraffel
+/.github/workflows/build-v8.yml @danielraffel
+/.github/workflows/release-watch.yml @danielraffel
+/.github/workflows/matched-milestone.yml @danielraffel
+/.github/workflows/validate-v8.yml @danielraffel
+/seal/coff.py @danielraffel
+/seal/coff_research.md @danielraffel
+/seal/elf.py @danielraffel
+/seal/macho.py @danielraffel
+/seal/policy.json @danielraffel
+/seal/test_coff_audit.py @danielraffel
+/seal/test_elf_audit.py @danielraffel
+/seal/test_macho_audit.py @danielraffel
+/tools/release_asset_guard.py @danielraffel
+/tools/matched_release.py @danielraffel
+/tools/lkgr_pin.py @danielraffel
+/tools/milestone_pin.py @danielraffel
+/tools/check_single_sha.py @danielraffel
+/tools/test_release_path_gate.py @danielraffel
+/tools/run_tests.sh @danielraffel
+/tools/lkgr_decision.py @danielraffel
+/tools/http_retry.py @danielraffel
+/tools/rhel8/check_glibc_floor.py @danielraffel
+/tools/check_glibcxx_floor.py @danielraffel

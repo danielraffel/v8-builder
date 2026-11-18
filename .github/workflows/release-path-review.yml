@@ -1,0 +1,142 @@
+# Posts the `release-path-review` commit status. A pull request that changes a
+# file .github/CODEOWNERS names, or any workflow or local action, needs two
+# counted reviewer APPROVEs of its exact head, from different signers and
+# sessions (Vellum Decision 0014). The rule is Vellum's
+# scripts/release_path_review.py and scripts/counted_verdicts.py, checked out
+# from Generous-Corp/vellum at a pinned commit and run against this
+# repository's default branch: its .github/CODEOWNERS (the protected files) and
+# .shipyard/config.toml (the counted signers and sessions). Nothing is read
+# from the pull request's tree. Every trigger runs the default branch's
+# definition of this file: a review reaches it through the permission-less
+# "Release path review trigger" workflow's completion.
+#
+# This is an accident guard, not a security boundary (pulp-planning
+# architecture/2026-11-05-release-path-gate.md, option A). The status is
+# posted with the Actions token and the ruleset binds it to GitHub Actions, so
+# any workflow holding that token, or anyone holding the fleet App's key, can
+# forge it. It stops honest mistakes; it does not stop a compromised agent.
+name: Release path review
+
+on:
+  pull_request_target:
+    # `edited` covers a base change, so a stacked pull request retargeted to
+    # main is judged by main's copy.
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Release path review trigger]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-path-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  judge:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Check out the base rule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          # A merge-queue range is judged with git, from the default branch's
+          # full history and the queue commit fetched below.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The rule itself, from Vellum at a pinned commit. The script reads its
+      # policy from the directory above its own, so the two files are copied
+      # into this checkout's scripts/ and run there.
+      - name: Check out the pinned rule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Generous-Corp/vellum
+          ref: 81a07151e75005443a82cad7d064f7da3ac127ec
+          path: .release-path-rule
+          sparse-checkout: |
+            scripts/release_path_review.py
+            scripts/counted_verdicts.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Install the pinned rule
+        run: |
+          mkdir -p scripts
+          cp .release-path-rule/scripts/release_path_review.py .release-path-rule/scripts/counted_verdicts.py scripts/
+
+      # The pinned rule refuses a CODEOWNERS that names no files. Until the
+      # default branch's CODEOWNERS lists release-path files there is nothing to
+      # enforce: the gate passes without running the rule.
+      - name: Look for a release-path rule
+        id: rule
+        run: python3 -I tools/release_path_rule.py >> "$GITHUB_OUTPUT"
+
+      - name: Pass without a release-path rule
+        if: steps.rule.outputs.has_rule != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          sha="$HEAD_SHA"
+          if [[ "$EVENT_NAME" == issue_comment ]]; then
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)"
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "release-path-review: no head to post on"; exit 0; }
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$sha" \
+            -f state=success -f context=release-path-review \
+            -f description="no release-path rule in CODEOWNERS" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          echo "release-path-review: success on $sha: no release-path rule in CODEOWNERS"
+
+      # Only the commit objects are fetched; nothing from the queue is checked
+      # out or run. A failed fetch leaves the commit missing, which the rule
+      # reports as `error`.
+      - name: Fetch the merge-queue commit
+        if: steps.rule.outputs.has_rule == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          [[ "$QUEUE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --no-tags --quiet origin "$QUEUE_SHA" || echo "release-path-review: could not fetch $QUEUE_SHA"
+
+      - name: Decide release-path-review
+        id: decide
+        if: steps.rule.outputs.has_rule == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/release_path_review.py
+
+      - name: Post release-path-review
+        if: steps.rule.outputs.has_rule == 'true' && steps.decide.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.decide.outputs.sha }}
+          STATE: ${{ steps.decide.outputs.state }}
+          DESCRIPTION: ${{ steps.decide.outputs.description }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state="$STATE" -f context=release-path-review \
+            -f description="$DESCRIPTION" -f target_url="$TARGET_URL" > /dev/null
+          echo "release-path-review: $STATE on $SHA: $DESCRIPTION"
+
+      - name: Fail a refused pull request run
+        if: github.event_name == 'pull_request_target' && steps.decide.outputs.state != '' && steps.decide.outputs.state != 'success'
+        run: exit 1
