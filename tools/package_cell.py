@@ -7,7 +7,9 @@ exact bytes a release publishes.  Packing the same directory twice gives the
 same bytes: members are sorted, every timestamp is 1980-01-01, and a member's
 mode is 0755 or 0644 depending only on its owner-execute bit.  Symlinks are
 stored as the file they point to, which is what the release has always held
-(``actions/upload-artifact`` flattens them).
+(``actions/upload-artifact`` flattens them).  A symlink, to a file or a
+directory, whose real path leaves the cell is refused: the archive holds the
+cell and nothing else.
 
 Excluded, as before: the top-level ``validate/`` offline harness (the
 android and cross-built Windows validators, which duplicate the shipped
@@ -31,15 +33,48 @@ def excluded(rel: str) -> bool:
     return parts[0] == "validate" or "__MACOSX" in parts or parts[-1] == ".DS_Store"
 
 
+def inside(path: Path, root: Path) -> bool:
+    """Whether ``path``'s real path is ``root`` (already resolved) or below it."""
+    real = path.resolve()
+    return real == root or root in real.parents
+
+
 def members(cell: Path) -> list[tuple[str, Path]]:
+    root = cell.resolve()
     found = []
+    escapes = []
+    # The real directories on the walked path to each directory, so a symlink
+    # back to one of them (a cycle) is not followed forever.
+    chain = {str(cell): frozenset({root})}
     for directory, subdirs, names in os.walk(cell, followlinks=True):
-        subdirs.sort()
+        here = Path(directory)
+        above = chain.pop(directory)
+        kept = []
+        for name in sorted(subdirs):
+            path = here / name
+            if excluded(path.relative_to(cell).as_posix()):
+                continue
+            if not inside(path, root):
+                escapes.append(f"{path.relative_to(cell).as_posix()} -> {path.resolve()}")
+                continue
+            real = path.resolve()
+            if real in above:
+                escapes.append(f"{path.relative_to(cell).as_posix()} -> {real} (a cycle)")
+                continue
+            chain[str(path)] = above | {real}
+            kept.append(name)
+        subdirs[:] = kept
         for name in names:
-            path = Path(directory) / name
+            path = here / name
             rel = path.relative_to(cell).as_posix()
-            if not excluded(rel) and path.is_file():
+            if excluded(rel):
+                continue
+            if not inside(path, root):
+                escapes.append(f"{rel} -> {path.resolve()}")
+            elif path.is_file():
                 found.append((rel, path))
+    if escapes:
+        raise SystemExit("package_cell: symlinks leave the cell " + str(cell) + ": " + "; ".join(sorted(escapes)))
     return sorted(found)
 
 

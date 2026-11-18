@@ -122,6 +122,39 @@ def test_package_cell_is_reproducible_and_lean():
             assert modes["lib/libv8.dylib"] == 0o755 and modes["manifest.json"] == 0o644
 
 
+def test_package_cell_refuses_symlinks_that_leave_the_cell():
+    def refused(cell: Path, fragment: str) -> None:
+        try:
+            package_cell.pack(cell, cell.parent / "out.zip")
+        except SystemExit as error:
+            assert "leave the cell" in str(error) and fragment in str(error), error
+        else:
+            raise AssertionError(f"packed {fragment} from outside the cell")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        outside = Path(tmp) / "outside"
+        (outside / "secrets").mkdir(parents=True)
+        (outside / "secrets" / "token").write_text("not for release\n")
+        cell = Path(tmp) / "linux-x64"
+        (cell / "lib").mkdir(parents=True)
+        (cell / "lib" / "libv8.so").write_bytes(b"so")
+        (cell / "lib" / "token").symlink_to(outside / "secrets" / "token")
+        refused(cell, "lib/token")
+        (cell / "lib" / "token").unlink()
+        (cell / "include").symlink_to(outside / "secrets")
+        refused(cell, "include")
+        (cell / "include").unlink()
+        # A link back up the tree is a cycle, not a directory to follow forever.
+        (cell / "lib" / "loop").symlink_to(cell)
+        refused(cell, "a cycle")
+        (cell / "lib" / "loop").unlink()
+        # Control: links that stay inside the cell still pack, and an
+        # excluded directory is never walked.
+        (cell / "lib" / "alias.so").symlink_to(cell / "lib" / "libv8.so")
+        (cell / "validate").symlink_to(outside)
+        assert package_cell.pack(cell, Path(tmp) / "ok.zip") == ["lib/alias.so", "lib/libv8.so"]
+
+
 # --------------------------------------------------------------- naming ----
 
 def test_release_ids_and_attested_tags():
