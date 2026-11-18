@@ -17,7 +17,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import release_asset_guard as guard  # noqa: E402
 
 GUARD = HERE / "release_asset_guard.py"
 REPO = "owner/v8-builder"
@@ -126,7 +125,8 @@ class GuardEndToEnd(unittest.TestCase):
         self.assertIn("REFUSED", result.stderr)
         self.assertIn("published:  sha256:" + sha(b"published bytes"), result.stderr)
         self.assertIn("this build: sha256:" + sha(b"rebuilt bytes"), result.stderr)
-        self.assertIn(f"replace_asset={name}", result.stderr)
+        self.assertIn("Published assets are immutable", result.stderr)
+        self.assertIn("new release tag (or a new asset name)", result.stderr)
         self.assertIn(f"set {name} sha256 {sha(b'published bytes')} -> {sha(b'rebuilt bytes')}",
                       result.stderr)
         self.assertEqual(fake.uploads(), [])
@@ -154,72 +154,41 @@ class GuardEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(fake.uploads(), [], "a refusal must not leave a partial upload behind")
 
-    def test_override_replaces_and_records_both_digests(self):
+    def test_override_refuses_changed_digest_without_uploading(self):
         name = "v8-win-arm64-m153-15.3.76.5-26cef0256b0e.zip"
         fake = FakeRelease(self.tmp, {name: b"first build"}, body="Matched V8 notes\n")
         result = fake.run("publish", self.local(name, b"second build"),
-                          "--allow-replace", name, "--reason", "rebuilt after a toolchain fix")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("old sha256:" + sha(b"first build"), result.stdout)
-        self.assertIn("new sha256:" + sha(b"second build"), result.stdout)
-        uploads = fake.uploads()
-        self.assertEqual(len(uploads), 1)
-        self.assertIn("--clobber", uploads[0])
-        rel = fake.state["release"]
-        self.assertEqual(rel["assets"][0]["digest"], "sha256:" + sha(b"second build"))
-        self.assertTrue(rel["body"].startswith("Matched V8 notes"))
-        ledger = guard.extract_ledger(rel["body"])
-        self.assertEqual(len(ledger), 1)
-        self.assertIn(sha(b"first build"), ledger[0])
-        self.assertIn(sha(b"second build"), ledger[0])
-        self.assertIn("rebuilt after a toolchain fix", ledger[0])
-        self.assertIn("Release asset replaced", (self.tmp / "summary.md").read_text())
-
-    def test_replacement_that_does_not_land_fails_and_records_nothing(self):
-        # gh can report success while the release still serves the old bytes
-        # (a stale upload, a race with another writer).  The guard must re-read
-        # the release and refuse to record a replacement it cannot see.
-        name = "a.zip"
-        fake = FakeRelease(self.tmp, {name: b"old"}, body="notes\n")
-        result = fake.run("publish", self.local(name, b"new"), "--allow-replace", name,
-                          "--reason", "r", FAKE_GH_UPLOAD_DOES_NOT_LAND="1")
+                          "--allow-replace", name, "--reason", "toolchain fix")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("expected sha256:" + sha(b"new"), result.stderr)
-        self.assertEqual(len(fake.uploads()), 1)
-        reads = [c for c in fake.state["calls"] if c[0] == "api" and "/releases/tags/" in c[1]]
-        self.assertEqual(len(reads), 2, "the release must be re-read after the replacement")
-        self.assertEqual(guard.extract_ledger(fake.state["release"]["body"]), [])
+        self.assertIn("Published assets are immutable", result.stderr)
+        self.assertIn("new release tag (or a new asset name)", result.stderr)
+        self.assertEqual(fake.uploads(), [])
+        self.assertEqual(fake.state["release"]["assets"][0]["digest"],
+                         "sha256:" + sha(b"first build"))
 
-    def test_override_requires_reason(self):
-        name = "a.zip"
-        fake = FakeRelease(self.tmp, {name: b"old"})
-        result = fake.run("publish", self.local(name, b"new"), "--allow-replace", name)
+    def test_override_refuses_even_when_digest_is_identical(self):
+        fake = FakeRelease(self.tmp, {"a.zip": b"same"})
+        result = fake.run("publish", self.local("a.zip", b"same"),
+                          "--allow-replace", "a.zip")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("requires --reason", result.stderr)
+        self.assertIn("Published assets are immutable", result.stderr)
         self.assertEqual(fake.uploads(), [])
 
-    def test_override_must_name_a_published_file(self):
+    def test_legacy_replace_assets_refuses(self):
         fake = FakeRelease(self.tmp, {"a.zip": b"old"})
         result = fake.run("publish", self.local("a.zip", b"new"),
-                          "--allow-replace", "typo.zip", "--reason", "r")
+                          "--replace-assets", "ALL:1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("typo.zip", result.stderr)
-        self.assertEqual(fake.uploads(), [])
-
-    def test_override_only_covers_the_named_asset(self):
-        fake = FakeRelease(self.tmp, {"a.zip": b"a-old", "b.zip": b"b-old"})
-        result = fake.run("publish", self.local("a.zip", b"a-new"), self.local("b.zip", b"b-new"),
-                          "--allow-replace", "a.zip", "--reason", "r")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("b.zip", result.stderr)
+        self.assertIn("Published assets are immutable", result.stderr)
         self.assertEqual(fake.uploads(), [])
 
     def test_dry_run_never_uploads(self):
         fake = FakeRelease(self.tmp, {"a.zip": b"old"})
-        result = fake.run("publish", self.local("a.zip", b"new"), self.local("n.zip", b"n"),
-                          "--allow-replace", "a.zip", "--reason", "r", "--dry-run")
+        result = fake.run("publish", self.local("a.zip", b"old"), self.local("n.zip", b"n"),
+                          "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("replace", result.stdout)
+        self.assertIn("skip-identical", result.stdout)
+        self.assertIn("upload", result.stdout)
         self.assertEqual(fake.uploads(), [])
 
     def test_missing_release_refused_for_backfill(self):
@@ -245,28 +214,6 @@ class GuardEndToEnd(unittest.TestCase):
         result = fake2.run("publish", self.local("a.zip", b"changed"))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(fake2.uploads(), [])
-
-    def test_carry_ledger_survives_regenerated_notes(self):
-        entry = "- 2026-10-11T22:53:45Z `a.zip` replaced: sha256 `1` -> `2`. Reason: r"
-        body = guard.with_ledger("old notes\n", [entry])
-        fake = FakeRelease(self.tmp, {"a.zip": b"x"}, body=body)
-        notes = self.tmp / "release-notes.md"
-        notes.write_text("fresh notes\n")
-        result = fake.run("carry-ledger", str(notes))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        text = notes.read_text()
-        self.assertTrue(text.startswith("fresh notes"))
-        self.assertEqual(guard.extract_ledger(text), [entry])
-
-
-class LedgerFormatting(unittest.TestCase):
-    def test_with_ledger_is_idempotent_and_appends(self):
-        once = guard.with_ledger("notes", ["- one"])
-        self.assertEqual(guard.with_ledger(once, ["- one"]), once)
-        twice = guard.with_ledger(once, guard.extract_ledger(once) + ["- two"])
-        self.assertEqual(guard.extract_ledger(twice), ["- one", "- two"])
-        self.assertEqual(twice.count(guard.LEDGER_START), 1)
-
 
 class WorkflowsUseTheGuard(unittest.TestCase):
     """No workflow may put bytes on a release except through the guard."""
@@ -299,79 +246,10 @@ class WorkflowsUseTheGuard(unittest.TestCase):
                 with self.subTest(workflow=path.name, line=number + 1):
                     self.assertIn("overwrite_files: false", step)
 
-class ReplaceAssetsSpec(unittest.TestCase):
-    """The workflow's replace_assets input is parsed by the guard, not shell."""
-
-    NAMES = ["v8-mac-arm64-x.zip", "v8-win-x64-x.zip", "release-metadata.json"]
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.out = self.tmp / "out"
-        self.out.mkdir()
-        self.fake = FakeRelease(self.tmp, {name: b"old " + name.encode() for name in self.NAMES})
-        self.files = []
-        for name in self.NAMES:
-            path = self.out / name
-            path.write_bytes(b"new " + name.encode())
-            self.files.append(str(path))
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def publish(self, spec, reason="toolchain fix"):
-        return self.fake.run("publish", *self.files, "--replace-assets", spec, "--reason", reason)
-
-    def test_all_with_the_right_count_replaces_every_asset_and_names_them(self):
-        result = self.publish("ALL:3")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("3 asset(s) authorized for replacement", result.stdout)
-        for name in self.NAMES:
-            self.assertIn(f"  {name}\n", result.stdout)
-        self.assertEqual(len(self.fake.uploads()), 3)
-        self.assertEqual(len(guard.extract_ledger(self.fake.state["release"]["body"])), 3)
-
-    def test_bare_all_is_refused(self):
-        for spec in ("ALL", "all", "ALL:", "ALL:x", "ALLx"):
-            with self.subTest(spec=spec):
-                result = self.publish(spec)
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("ALL:<count>", result.stderr)
-                self.assertIn("publishes 3 assets", result.stderr)
-        self.assertEqual(self.fake.uploads(), [])
-
-    def test_all_with_a_wrong_count_is_refused_and_lists_the_assets(self):
-        result = self.publish("ALL:9")
-        self.assertEqual(result.returncode, 1)
-        for name in self.NAMES:
-            self.assertIn(name, result.stderr)
-        self.assertEqual(self.fake.uploads(), [])
-
-    def test_named_assets_only_cover_those_assets(self):
-        result = self.publish(" v8-win-x64-x.zip , release-metadata.json ")
-        self.assertEqual(result.returncode, 1, "the unnamed mac zip still differs")
-        self.assertIn("v8-mac-arm64-x.zip", result.stderr)
-        self.assertEqual(self.fake.uploads(), [])
-        result = self.fake.run("publish", self.files[1], self.files[2], "--replace-assets",
-                               "v8-win-x64-x.zip,release-metadata.json", "--reason", "r")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(self.fake.uploads()), 2)
-
-    def test_a_replacement_needs_a_reason(self):
-        result = self.publish("ALL:3", reason="   ")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("requires --reason", result.stderr)
-        self.assertEqual(self.fake.uploads(), [])
-
-    def test_empty_spec_authorizes_nothing(self):
-        result = self.publish("", reason="")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("REFUSED", result.stderr)
-        self.assertEqual(self.fake.uploads(), [])
-
-    def test_workflow_hands_the_raw_input_to_the_guard(self):
+    def test_workflow_exposes_no_replacement_inputs_or_args(self):
         workflow = (HERE.parent / ".github" / "workflows" / "build-v8.yml").read_text()
-        self.assertIn('--replace-assets "$REPLACE_ASSETS"', workflow)
+        self.assertNotIn("replace_assets", workflow)
+        self.assertNotIn("replace_reason", workflow)
         self.assertNotIn("--allow-replace", workflow)
 
 
