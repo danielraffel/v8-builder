@@ -463,7 +463,7 @@ def macho_consumer(rpaths: tuple[str, ...] = (CONSUMER_RPATH,)) -> bytes:
 def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
                     consumer: bytes | None = None, ran: bool | None = None,
                     ran_evidence: str | None = None, linked: bytes | None = None,
-                    require_link_proof: bool = False) -> tuple[dict, Path]:
+                    require_link_proof: bool = True) -> tuple[dict, Path]:
     out = tmp / "v8" / "out" / "mac-arm64"
     bin_dir = tmp / "v8" / "third_party" / "llvm-build" / "Release+Asserts" / "bin"
     out.mkdir(parents=True)
@@ -622,13 +622,18 @@ def test_consumer_link_is_proven_by_its_loader_not_a_named_path():
         row = receipt["consumer_link"]
         assert row["link_proof"] == "linked_unverified" and "does not resolve" in row["link_proof_reason"]
         assert receipt["runtime_identity"]["status"] == "not_run"
-        assert receipt_tool.validate_receipt(receipt, archive) == []
-        row["link_proof"] = "linked_packaged_bytes"
-        expect_failure(receipt_tool.validate_receipt(receipt, archive), "resolved_sha256 is missing")
-    with tempfile.TemporaryDirectory() as tmp:
-        lost = macho_consumer(rpaths=("/nowhere",))
-        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=lost, require_link_proof=True)
+        # A mac cell requires the proof: not proven.
         expect_failure(receipt_tool.validate_receipt(receipt, archive), "must prove the packaged bytes")
+        # Control: the receipt cannot opt out of the requirement by its own flag.
+        row["link_proof_required"] = False
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "but a mac cell's is True")
+        # Android may record an unverified link (no device run); the problems
+        # then are only the flag's.
+        library = receipt["library"]
+        row["link_proof_required"] = False
+        assert receipt_tool.link_proof_problems(row, library, "android") == []
+        row["link_proof"] = "linked_packaged_bytes"
+        expect_failure(receipt_tool.link_proof_problems(row, library, "android"), "resolved_sha256 is missing")
 
 
 def test_elf_consumer_resolves_through_its_runpath():
@@ -644,10 +649,10 @@ def test_elf_consumer_resolves_through_its_runpath():
                                     runpath="$ORIGIN/../lib"))
         assert binfacts.load_paths(consumer.read_bytes()) == {"rpath": [], "runpath": ["$ORIGIN/../lib"]}
         row = receipt_tool.consumer_row(consumer, True, "", "lib/libv8.so", lib_sha,
-                                        binfacts.binary_facts(library))
+                                        binfacts.binary_facts(library), require_link_proof=True)
         assert row["link_proof"] == "linked_packaged_bytes", row
         assert receipt_tool.link_proof_problems(row, {"member": "lib/libv8.so", "sha256": lib_sha,
-                                                      "facts": binfacts.binary_facts(library)}) == []
+                                                      "facts": binfacts.binary_facts(library)}, "linux") == []
         # Control: another soname is another library, whatever the file is called.
         row = receipt_tool.consumer_row(consumer, True, "", "lib/libv8.so", lib_sha,
                                         binfacts.binary_facts(elf_so(soname="libv8.so.2")))

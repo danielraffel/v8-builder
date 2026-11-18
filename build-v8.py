@@ -1521,7 +1521,11 @@ class V8Build:
         if not exe.exists():
             raise SystemExit(f"expected validator {exe} not produced")
         libname = self.LIBNAME[self.args.platform]
-        lib = out / libname
+        # The packaged (stripped) libv8.so, not the unstripped link output in `out`, so a
+        # device run exercises the bytes the release ships and its marker names them.
+        lib = BUILD_DIR / self._cell_id(arch) / self._manifest_lib_path(libname, arch)
+        if not lib.is_file():
+            raise SystemExit(f"expected packaged {lib} before the android validator runs")
         # Always bundle the cross-built exe + co-located libv8.so into the artifact so an
         # arm64 emulator/device (Mac Studio) can run identity offline (the win-arm64-cross
         # pattern). An android-arm64 ELF can't run on the x86_64 build host.

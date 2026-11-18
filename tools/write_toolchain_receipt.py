@@ -580,9 +580,24 @@ def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: P
     return receipt
 
 
-def link_proof_problems(consumer: dict, library: dict) -> list[str]:
+# Cells whose consumer must prove it loaded the packaged bytes.  Android's
+# validator runs on a device through LD_LIBRARY_PATH, so without a device run
+# its link is recorded linked_unverified; every other consumer's own run-path
+# leads to the packaged library.
+LINK_PROOF_OPTIONAL = {"android"}
+
+
+def link_proof_required(platform: str) -> bool:
+    return platform not in LINK_PROOF_OPTIONAL
+
+
+def link_proof_problems(consumer: dict, library: dict, platform: str) -> list[str]:
     """Recompute what the consumer link claims from the receipt's own fields."""
     problems: list[str] = []
+    required = link_proof_required(platform)
+    if consumer.get("link_proof_required") is not required:
+        problems.append(f"consumer_link.link_proof_required = {consumer.get('link_proof_required')!r}, "
+                        f"but a {platform or 'unknown'} cell's is {required!r}")
     proof = consumer.get("link_proof")
     if proof not in LINK_PROOFS:
         problems.append(f"consumer_link.link_proof = {proof!r}: "
@@ -593,7 +608,7 @@ def link_proof_problems(consumer: dict, library: dict) -> list[str]:
         problems.append(f"consumer_link.library_identity {consumer.get('library_identity')!r} "
                         f"is not the library's {identity!r}")
     if proof == "linked_unverified":
-        if consumer.get("link_proof_required") is not False:
+        if required:
             problems.append("the consumer link must prove the packaged bytes for this cell: "
                             + str(consumer.get("link_proof_reason", "")))
         if not str(consumer.get("link_proof_reason", "")).strip():
@@ -706,7 +721,7 @@ def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
             problems.append(f"consumer_link.status {status!r} disagrees with ran = {consumer.get('ran')!r}")
         if not str(consumer.get("run", "")).strip():
             problems.append("consumer_link.run does not say whether the consumer ran")
-        problems.extend(link_proof_problems(consumer, library))
+        problems.extend(link_proof_problems(consumer, library, platform))
         if consumer.get("references_library") is not True:
             problems.append("the consumer does not load the library")
         if ARCH_ALIASES.get(str(consumer.get("arch")), consumer.get("arch")) != ARCH_ALIASES.get(arch, arch):
@@ -756,8 +771,8 @@ def main(argv: list[str] | None = None) -> int:
                              "the consumer counts as run only if it names this binary")
     parser.add_argument("--consumer-note", default="")
     parser.add_argument("--require-link-proof", action="store_true",
-                        help="the consumer's loader entry must resolve to the packaged bytes; "
-                             "without this a cell whose loader cannot be followed is recorded linked_unverified")
+                        help="the consumer's loader entry must resolve to the packaged bytes. Every "
+                             "platform but android requires it whether or not this is passed")
     parser.add_argument("--content-addressed-dir", type=Path)
     parser.add_argument("--check", action="store_true",
                         help="validate an existing receipt against --archive instead of writing one")
@@ -787,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
                             consumer=args.consumer, consumer_ran=args.consumer_ran,
                             consumer_note=args.consumer_note,
                             consumer_ran_evidence=args.consumer_ran_evidence,
-                            require_link_proof=args.require_link_proof)
+                            require_link_proof=args.require_link_proof or link_proof_required(args.platform))
     data = canonical_bytes(receipt)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)
