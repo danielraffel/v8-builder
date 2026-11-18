@@ -27,3 +27,5 @@
 /tools/check_single_sha.py @danielraffel
 /tools/test_release_path_gate.py @danielraffel
 /tools/run_tests.sh @danielraffel
+/tools/lkgr_decision.py @danielraffel
+/tools/http_retry.py @danielraffel
