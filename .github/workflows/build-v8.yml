@@ -703,9 +703,9 @@ jobs:
             python3 tools/write_toolchain_receipt.py "${receipts[0]}" --archive "$archive" --check
             python3 tools/write_legal_manifest.py "${manifests[0]}" --archive "$archive" --check
           done
-          complete=()
-          [ "$PLATFORMS" = "all" ] && complete=(--complete)
-          python3 tools/assemble_release.py release ${complete[@]+"${complete[@]}"} \
+          # Exactly the cells this dispatch selected: one that was skipped or
+          # failed upstream leaves no archive, and must not read as green.
+          python3 tools/assemble_release.py release --expect "$PLATFORMS" \
             --v8-version "$V8_VERSION" | tee -a "$GITHUB_OUTPUT"
           (cd release && sha256sum -- *.zip *.json) > subjects.sha256
           cat subjects.sha256

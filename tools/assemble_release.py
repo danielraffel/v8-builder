@@ -13,11 +13,14 @@ consistent and writes the two files that describe it:
 
 It refuses a set where an archive lacks either record or has more than one,
 where a record names an archive that is not present, where the archives do
-not share one release id, or (``--complete``) where a platform is missing.
+not share one release id, or where the archives are not exactly the cells
+the dispatch selected (``--expect``, the workflow's ``platforms`` input). A
+selected cell that was skipped or failed upstream leaves its archive out, so
+it fails here instead of reading as green.
 It prints ``release_id=``, ``title=`` and ``display_version=`` lines for
 ``$GITHUB_OUTPUT``.
 
-Usage: assemble_release.py <release dir> [--complete] [--v8-version X]
+Usage: assemble_release.py <release dir> [--expect all|<id>,<id>...] [--v8-version X]
 """
 from __future__ import annotations
 
@@ -35,6 +38,14 @@ EXPECTED = (
     "v8-mac-arm64", "v8-mac-x86_64", "v8-linux-arm64", "v8-linux-x64",
     "v8-win-x64", "v8-win-arm64", "v8-android-arm64", "v8-ios-simulator-arm64",
 )
+# The workflow's platform ids (matrix platform/arch) and the cell each packs.
+PLATFORM_CELLS = {
+    "mac/arm64": "v8-mac-arm64", "mac/x86_64": "v8-mac-x86_64",
+    "linux/arm64": "v8-linux-arm64", "linux/x64": "v8-linux-x64",
+    "win/x64": "v8-win-x64", "win/arm64": "v8-win-arm64",
+    "android/arm64": "v8-android-arm64", "ios/arm64": "v8-ios-simulator-arm64",
+}
+assert sorted(PLATFORM_CELLS.values()) == sorted(EXPECTED)
 RECORD_RE = re.compile(
     r"^(?P<stem>.+)\.(?P<kind>legal-manifest|apple-toolchain|linux-toolchain|android-toolchain|"
     r"windows-toolchain)\.sha256-[0-9a-f]{64}\.json$")
@@ -51,7 +62,22 @@ def cell_of(archive_name: str, release_id: str) -> str:
     return archive_name[:-len(suffix)]
 
 
-def assemble(release: Path, complete: bool, v8_version: str = "") -> dict[str, object]:
+def expected_cells(platforms: str) -> list[str]:
+    """The cells a ``platforms`` input selects: ``all`` or comma-separated exact ids."""
+    platforms = platforms.strip()
+    if platforms == "all":
+        return sorted(EXPECTED)
+    ids = [item.strip() for item in platforms.split(",") if item.strip()]
+    if not ids:
+        raise AssemblyError("no platform selected")
+    unknown = sorted(set(ids) - set(PLATFORM_CELLS))
+    if unknown:
+        raise AssemblyError(f"unknown platform ids {unknown}; known: {sorted(PLATFORM_CELLS)}")
+    return sorted({PLATFORM_CELLS[item] for item in ids})
+
+
+def assemble(release: Path, complete: bool = False, v8_version: str = "",
+             expect: str | None = None) -> dict[str, object]:
     zips = sorted(release.glob("*.zip"))
     if not zips:
         raise AssemblyError(f"no archive in {release}")
@@ -66,10 +92,14 @@ def assemble(release: Path, complete: bool, v8_version: str = "") -> dict[str, o
     release_id = ids.pop()
     cells = {archive.name: cell_of(archive.name, release_id) for archive in zips}
     if complete:
-        missing = sorted(set(EXPECTED) - set(cells.values()))
-        extra = sorted(set(cells.values()) - set(EXPECTED))
-        if missing or extra or len(zips) != len(EXPECTED):
-            raise AssemblyError(f"incomplete release assets: count={len(zips)} missing={missing} extra={extra}")
+        expect = "all"
+    if expect is not None:
+        wanted = expected_cells(expect)
+        missing = sorted(set(wanted) - set(cells.values()))
+        extra = sorted(set(cells.values()) - set(wanted))
+        if missing or extra or len(zips) != len(wanted):
+            raise AssemblyError(f"incomplete release assets for platforms={expect!r}: "
+                                f"count={len(zips)} expected={len(wanted)} missing={missing} extra={extra}")
 
     provenance: dict[str, dict[str, str]] = {archive.name: {} for archive in zips}
     for record in sorted(release.glob("*.json")):
@@ -170,11 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("release", type=Path)
-    parser.add_argument("--complete", action="store_true", help="require every platform")
+    parser.add_argument("--complete", action="store_true", help="require every platform (--expect all)")
+    parser.add_argument("--expect", help="require exactly the cells this platforms input selects")
     parser.add_argument("--v8-version", default="")
     args = parser.parse_args(argv)
     try:
-        meta = assemble(args.release, args.complete, args.v8_version)
+        meta = assemble(args.release, args.complete, args.v8_version, expect=args.expect)
     except AssemblyError as error:
         print(f"::error::{error}")
         return 1

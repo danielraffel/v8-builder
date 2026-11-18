@@ -156,7 +156,8 @@ after it and their own sha256. None of them changes the archive's bytes.
 Each build job proves its two records with `--check` (the archive digest, every zip
 member, no unresolved license gap, the library's architecture, OS and linker) and fails
 if either does not hold. The `attest` job, which runs no V8 code and is the only job with
-an OIDC grant, proves them again before signing. `release-metadata.json` maps each
+an OIDC grant, proves them again before signing, and fails unless the set holds exactly
+the cells the dispatch's `platforms` selected, so a skipped cell cannot read as green. `release-metadata.json` maps each
 archive to its records under `provenance`.
 
 To verify an archive:

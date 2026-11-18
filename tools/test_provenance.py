@@ -519,6 +519,21 @@ def test_assemble_release_requires_both_records_per_archive():
             assert "incomplete" in str(error)
         else:
             raise AssertionError("an incomplete set was accepted with --complete")
+        # The dispatch's own selection: exactly these cells passes, in any order.
+        assert assemble_release.assemble(release, expect="win/x64,mac/arm64")["release_id"] == rid
+        # Control: a selected cell that left no archive (skipped or filtered) fails.
+        for expect, needle in (("win/x64,mac/arm64,ios/arm64", "v8-ios-simulator-arm64"),
+                               ("all", "v8-linux-x64"),
+                               ("win/x64", "extra=['v8-mac-arm64']"),
+                               ("mac/arm46", "unknown platform ids"),
+                               (" , ", "no platform selected")):
+            try:
+                assemble_release.assemble(release, expect=expect)
+            except assemble_release.AssemblyError as error:
+                assert needle in str(error), (expect, str(error))
+            else:
+                raise AssertionError(f"platforms={expect!r} accepted a set without its cells")
+        assert assemble_release.main([str(release), "--expect", "win/x64,mac/arm64,android/arm64"]) == 1
         # Control: an archive without its receipt.
         next(release.glob("v8-win-x64-*.windows-toolchain.*.json")).unlink()
         try:
