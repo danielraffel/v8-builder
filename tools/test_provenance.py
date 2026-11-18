@@ -293,6 +293,52 @@ def test_legal_manifest_main_writes_only_proven_content_addressed_copies():
         assert legal.main([str(renamed), "--archive", str(archive), "--check"]) == 1
 
 
+def test_find_ninja_is_absolute_for_a_relative_source_root():
+    # The graph runs ninja with the out dir as its cwd, so a relative path
+    # resolves against the wrong directory there.
+    with tempfile.TemporaryDirectory() as tmp:
+        ninja_dir = Path(tmp) / "v8" / "third_party" / "ninja"
+        ninja_dir.mkdir(parents=True)
+        (ninja_dir / "ninja").write_bytes(b"ninja")
+        cwd = os.getcwd()
+        try:
+            os.chdir(tmp)
+            found = legal.find_ninja(Path("v8"))
+        finally:
+            os.chdir(cwd)
+        assert found and os.path.isabs(found), found
+        assert Path(found).resolve() == (ninja_dir / "ninja").resolve()
+
+
+def test_legal_manifest_resolves_a_checked_in_link_input():
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = FakeTree(Path(tmp))
+        data_dir = tree.src / "third_party" / "zoneinfo" / "src" / "data"
+        data_dir.mkdir(parents=True)
+        (data_dir / "zoneinfo64.res").write_bytes(b"res")
+        (tree.src / "third_party" / "zoneinfo" / "LICENSE").write_text("zoneinfo license\n")
+        base_runner = tree.runner
+
+        def runner(args, cwd):
+            text = base_runner(args, cwd)
+            if "query" in args and "obj/libv8_monolith.a" in args:
+                text += "    ../../third_party/zoneinfo/src/data/zoneinfo64.res\n"
+            return text
+        tree.runner = runner
+        archive = tree.archive(Path(tmp) / "v8-win-x64-x.zip")
+        manifest = legal.build_manifest(archive, tree.graph(), "libv8.dylib", "win", "x64")
+        assert manifest["gaps"] == [], manifest["gaps"]
+        assert manifest["linked_objects"]["../../third_party/zoneinfo/src/data/zoneinfo64.res"] == \
+            ["source:third_party/zoneinfo/LICENSE"]
+
+        # Control: without its license the same input is a gap, not silently licensed.
+        (tree.src / "third_party" / "zoneinfo" / "LICENSE").unlink()
+        (tree.src / "LICENSE").unlink()
+        bare = legal.build_manifest(archive, tree.graph(), "libv8.dylib", "win", "x64")
+        assert {"kind": "object-without-license",
+                "path": "../../third_party/zoneinfo/src/data/zoneinfo64.res"} in bare["gaps"]
+
+
 # ------------------------------------------------------ toolchain receipt ----
 
 class FakeProbe(receipt_tool.Probe):
@@ -410,6 +456,41 @@ def test_toolchain_program_parsing():
     win = ('ninja -t msvc -e environment.x64 -- ..\\..\\third_party\\llvm-build\\Release+Asserts\\bin\\'
            'clang-cl.exe /c x.cc')
     assert receipt_tool.program_in(win).endswith("clang-cl.exe")
+
+
+def test_windows_sdk_is_read_from_the_gn_environment_block():
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        vs = r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+        kits = r"C:\Program Files (x86)\Windows Kits\10"
+        block = {
+            "INCLUDE": f"{vs}\\VC\\Tools\\MSVC\\14.44.35207\\include;{kits}\\include\\10.0.26100.0\\ucrt;",
+            "LIB": f"{vs}\\VC\\Tools\\MSVC\\14.44.35207\\lib\\x64;{kits}\\lib\\10.0.26100.0\\um\\x64",
+            "PATH": r"C:\Windows\system32",
+        }
+        (out / "environment.x64").write_text(
+            "".join(f"{key}={value}\0" for key, value in block.items()) + "\0", encoding="utf-8")
+        sdk = receipt_tool.windows_sdk(out)
+        assert sdk == {"windows_sdk_version": "10.0.26100.0", "msvc_tools_version": "14.44.35207",
+                       "vs_install_dir": vs}, sdk
+        # Control: a block without SDK paths stays unknown, which --check rejects.
+        (out / "environment.x64").write_text("PATH=C:\\Windows\0\0", encoding="utf-8")
+        assert set(receipt_tool.windows_sdk(out).values()) == {"unknown"}
+
+
+def test_android_ndk_revision_falls_back_to_deps():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "DEPS").write_text("vars = {\n  'android_ndk_version': Str('2@30.0.16248370'),\n}\n")
+        assert receipt_tool.android_ndk(root)["ndk_revision"] == "2@30.0.16248370"
+        props = root / "third_party" / "android_toolchain" / "ndk"
+        props.mkdir(parents=True)
+        (props / "source.properties").write_text("Pkg.Desc = Android NDK\nPkg.Revision = 30.0.16248370\n")
+        assert receipt_tool.android_ndk(root)["ndk_revision"] == "30.0.16248370"
+        # Control: neither record present.
+        (props / "source.properties").unlink()
+        (root / "DEPS").write_text("vars = {}\n")
+        assert receipt_tool.android_ndk(root)["ndk_revision"] == "unknown"
 
 
 def test_assemble_release_requires_both_records_per_archive():

@@ -181,6 +181,68 @@ def archive_manifest(archive: Path) -> dict:
         return json.loads(handle.read("manifest.json"))
 
 
+ANDROID_NDK_DEPS_RE = re.compile(r"""['"]android_ndk_version['"]\s*:\s*(?:Str\()?\s*['"]([^'"]+)['"]""")
+
+
+def android_ndk(source_root: Path) -> dict[str, object]:
+    """The NDK revision: source.properties when the checkout has one, else DEPS.
+
+    The DEPS-fetched cipd android_toolchain is stripped and ships no
+    source.properties, so the revision is the one the checkout's DEPS pinned.
+    """
+    props = source_root / "third_party" / "android_toolchain" / "ndk" / "source.properties"
+    if props.is_file():
+        for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Pkg.Revision"):
+                return {"ndk_revision": line.split("=", 1)[1].strip(), "ndk_revision_source": str(props)}
+    deps = source_root / "DEPS"
+    if deps.is_file():
+        match = ANDROID_NDK_DEPS_RE.search(deps.read_text(encoding="utf-8", errors="replace"))
+        if match:
+            return {"ndk_revision": match.group(1),
+                    "ndk_revision_source": f"{deps} android_ndk_version (the cipd android_toolchain version)"}
+    return {"ndk_revision": "unknown", "ndk_revision_source": str(props)}
+
+
+WIN_SDK_RE = re.compile(r"[\\/]Windows Kits[\\/]\d+[\\/](?:Include|Lib)[\\/](\d+(?:\.\d+){3})(?:[\\/]|$)",
+                        re.IGNORECASE)
+MSVC_RE = re.compile(r"^(.*?)[\\/]VC[\\/]Tools[\\/]MSVC[\\/](\d+(?:\.\d+)+)(?:[\\/]|$)", re.IGNORECASE)
+
+
+def windows_sdk(out_dir: Path) -> dict[str, object]:
+    """Windows SDK, MSVC tools and VS install dir the build compiled against.
+
+    GN's setup_toolchain.py writes out/<cell>/environment.<cpu> as a NUL
+    separated block, but keeps only INCLUDE, LIB, LIBPATH, PATH and a few
+    others, so the versions are read from the paths in those.
+    """
+    env: dict[str, str] = {}
+    for path in sorted(out_dir.glob("environment.*")):
+        for item in path.read_bytes().split(b"\0"):
+            key, _, value = item.decode("utf-8", errors="replace").partition("=")
+            key = key.upper()
+            if key in ("WINDOWSSDKVERSION", "VCTOOLSVERSION", "VSINSTALLDIR"):
+                env.setdefault(key, value.rstrip("\\/"))
+            elif key in ("INCLUDE", "LIB", "LIBPATH"):
+                env[key] = env.get(key, "") + ";" + value
+        if env:
+            break
+    for entry in ";".join(env.get(key, "") for key in ("INCLUDE", "LIB", "LIBPATH")).split(";"):
+        entry = entry.strip().strip('"')
+        sdk = WIN_SDK_RE.search(entry)
+        if sdk:
+            env.setdefault("WINDOWSSDKVERSION", sdk.group(1))
+        msvc = MSVC_RE.search(entry)
+        if msvc:
+            env.setdefault("VCTOOLSVERSION", msvc.group(2))
+            env.setdefault("VSINSTALLDIR", msvc.group(1))
+    return {
+        "windows_sdk_version": env.get("WINDOWSSDKVERSION", "unknown"),
+        "msvc_tools_version": env.get("VCTOOLSVERSION", "unknown"),
+        "vs_install_dir": env.get("VSINSTALLDIR", "unknown"),
+    }
+
+
 def platform_sdk(platform: str, cell: str, out_dir: Path, source_root: Path, probe: Probe) -> dict[str, object]:
     if platform in ("mac", "ios"):
         sdk = "macosx" if platform == "mac" else ("iphonesimulator" if "simulator" in cell else "iphoneos")
@@ -191,29 +253,9 @@ def platform_sdk(platform: str, cell: str, out_dir: Path, source_root: Path, pro
             "sdk_path": probe.out(["xcrun", "--sdk", sdk, "--show-sdk-path"]),
         }
     if platform == "android":
-        props = source_root / "third_party" / "android_toolchain" / "ndk" / "source.properties"
-        revision = "unknown"
-        if props.is_file():
-            for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("Pkg.Revision"):
-                    revision = line.split("=", 1)[1].strip()
-        return {"ndk_revision": revision, "ndk_properties": str(props)}
+        return android_ndk(source_root)
     if platform == "win":
-        env: dict[str, str] = {}
-        for path in sorted(out_dir.glob("environment.*")):
-            raw = path.read_bytes()
-            for item in raw.split(b"\0"):
-                key, _, value = item.decode("utf-8", errors="replace").partition("=")
-                if key.upper() in ("WINDOWSSDKVERSION", "VCTOOLSVERSION", "VSINSTALLDIR",
-                                   "VCTOOLSINSTALLDIR", "WINDOWSSDKDIR"):
-                    env.setdefault(key.upper(), value.rstrip("\\"))
-            if env:
-                break
-        return {
-            "windows_sdk_version": env.get("WINDOWSSDKVERSION", "unknown"),
-            "msvc_tools_version": env.get("VCTOOLSVERSION", "unknown"),
-            "vs_install_dir": env.get("VSINSTALLDIR", "unknown"),
-        }
+        return windows_sdk(out_dir)
     # linux
     glibc = probe.out(["ldd", "--version"]).splitlines()
     match = re.search(r"(\d+\.\d+)\s*$", glibc[0]) if glibc else None

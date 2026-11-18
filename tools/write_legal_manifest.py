@@ -409,7 +409,14 @@ class BuildGraph:
     def object_licenses(self, item: str) -> tuple[list[str], list[str]]:
         """(file ids, license ids) for one linked object (ninja-relative path)."""
         files, licenses = set(), set()
-        for source in sorted(self.sources.get(self.resolve(item), ())):
+        resolved = self.resolve(item)
+        sources = self.sources.get(resolved, ())
+        if not sources and relative(resolved, self.out_dir) is None \
+                and relative(resolved, self.source_root) is not None:
+            # A checked-in input the link consumes directly (a crate's
+            # precompiled .res data, say) is its own source.
+            sources = (resolved,)
+        for source in sorted(sources):
             file_id = self.file_id(source)
             if file_id:
                 files.add(file_id)
@@ -593,11 +600,13 @@ def validate_manifest(manifest: dict, archive: Path | None = None) -> list[str]:
 
 
 def find_ninja(source_root: Path) -> str | None:
+    """An absolute ninja path: the graph runs it with the out dir as its cwd."""
     for name in ("ninja.exe", "ninja"):
         candidate = source_root / "third_party" / "ninja" / name
         if candidate.is_file():
-            return str(candidate)
-    return shutil.which("ninja")
+            return os.path.abspath(candidate)
+    found = shutil.which("ninja")
+    return os.path.abspath(found) if found else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -632,7 +641,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not (args.source_root and args.out_dir and args.library):
         parser.error("--source-root, --out-dir and --library are required to write a manifest")
-    ninja = args.ninja or find_ninja(args.source_root)
+    ninja = args.ninja
+    if ninja and ("/" in ninja or os.sep in ninja):
+        ninja = os.path.abspath(ninja)
+    ninja = ninja or find_ninja(args.source_root)
     if not ninja:
         parser.error("no ninja binary found; pass --ninja")
     graph = BuildGraph(args.source_root, args.out_dir, ninja, builder_root=args.builder_root)
