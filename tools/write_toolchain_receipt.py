@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import platform as host_platform
+import posixpath
 import re
 import shlex
 import shutil
@@ -591,6 +592,16 @@ def link_proof_required(platform: str) -> bool:
     return platform not in LINK_PROOF_OPTIONAL
 
 
+def portable_path(path: str) -> str:
+    """A path as written on any host, compared on any host: --check runs on
+    Linux for receipts written on Windows, where os.path would not split
+    ``D:\\a\\out\\v8.dll``."""
+    path = path.replace("\\", "/")
+    drive = re.match(r"^[A-Za-z]:", path)
+    normal = posixpath.normpath(path)
+    return normal.lower() if drive else normal
+
+
 def link_proof_problems(consumer: dict, library: dict, platform: str) -> list[str]:
     """Recompute what the consumer link claims from the receipt's own fields."""
     problems: list[str] = []
@@ -624,7 +635,7 @@ def link_proof_problems(consumer: dict, library: dict, platform: str) -> list[st
     resolved = str(loader.get("resolves_to", ""))
     if resolved:
         _dirs, tail = search_dirs(fmt, entry, {}, "")
-        if not any(os.path.normpath(os.path.join(str(d), tail)) == resolved
+        if not any(portable_path(str(d) + "/" + tail) == portable_path(resolved)
                    for d in loader.get("search", []) or []):
             problems.append(f"consumer_link.loader.resolves_to {resolved!r} is not in its search path")
     elif not str(loader.get("how", "")).strip():

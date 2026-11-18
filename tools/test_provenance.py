@@ -659,6 +659,22 @@ def test_elf_consumer_resolves_through_its_runpath():
         assert row["references_library"] is False and row["link_proof"] == "linked_unverified"
 
 
+def test_windows_receipt_checks_on_a_linux_host():
+    """The attest job (Linux) re-checks receipts the Windows jobs wrote, whose
+    loader paths use drive letters and backslashes (CI run 44300734395)."""
+    lib_sha = "c" * 64
+    library = {"member": "lib/v8.dll", "sha256": lib_sha, "facts": {"format": "pe"}}
+    out = "D:\\a\\v8-builder\\v8-builder\\build\\src\\v8\\out\\win-arm64"
+    row = {"link_proof": "linked_packaged_bytes", "link_proof_required": True, "format": "pe",
+           "library_identity": "v8.dll", "needed": ["KERNEL32.dll", "v8.dll"],
+           "loader": {"entry": "v8.dll", "search": [out], "resolves_to": out + "\\v8.dll",
+                      "resolved_sha256": lib_sha}}
+    assert receipt_tool.link_proof_problems(row, library, "win") == []
+    # Control: a DLL outside the search path is still refused.
+    row["loader"]["resolves_to"] = "D:\\elsewhere\\v8.dll"
+    expect_failure(receipt_tool.link_proof_problems(row, library, "win"), "not in its search path")
+
+
 def test_android_runtime_identity_needs_a_device_run():
     """Finding: with no adb or device the Android cell read as validated.
 
