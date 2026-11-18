@@ -10,7 +10,8 @@ tell whether its own toolchain and target OS are compatible:
   cell's ``toolchain.ninja``, and the compiler and linker each resolves to:
   path, SHA-256 and ``--version`` banner;
 * the post-link tools (``strip``, and ``codesign`` on Apple) that rewrote
-  the library before it was packaged;
+  the library before it was packaged, each with its path, SHA-256 and
+  version;
 * the platform SDK: Xcode and the SDK on Apple, the NDK on Android, the
   Windows SDK and MSVC tools on Windows, glibc and libstdc++ on Linux;
 * the GN ``args.gn`` the cell was built with;
@@ -272,20 +273,68 @@ def platform_sdk(platform: str, cell: str, out_dir: Path, source_root: Path, pro
             "os_release": os_release.get("PRETTY_NAME", "unknown")}
 
 
+CODESIGN_PROJECT_RE = re.compile(r"PROJECT:(codesign-[0-9][0-9.]*)")
+POST_LINK_TOOLS = {"mac": ("strip", "codesign"), "ios": ("strip", "codesign"),
+                   "linux": ("strip",), "android": ("strip",), "win": ("strip",)}
+
+
+def version_line(text: str) -> str:
+    """The line of a --version banner that carries the version number."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        if re.search(r"version \d", line, re.IGNORECASE):
+            return line
+    return lines[0] if lines else "unknown"
+
+
 def post_link_tools(platform: str, source_root: Path, probe: Probe) -> dict[str, object]:
+    """The tools that rewrote the library after the link, each with its path,
+    sha256 and version, so --check can require evidence of every one."""
     if platform in ("mac", "ios"):
-        strip = probe.out(["xcrun", "--find", "strip"])
-        return {"strip": {"path": strip, "version": probe.out(["xcrun", "strip", "-V"]).splitlines()[0]
-                          if probe.out(["xcrun", "strip", "-V"]) else "unknown",
+        strip = probe.out(["xcrun", "--find", "strip"]).strip() or "unknown"
+        xcode = probe.out(["xcodebuild", "-version"]).replace("\n", " ").strip() or "unknown"
+        codesign = probe.which("codesign") or "unknown"
+        project = CODESIGN_PROJECT_RE.search(probe.out(["what", codesign])) if codesign != "unknown" else None
+        return {"strip": {"path": strip, "sha256": probe.sha256(strip) if strip != "unknown" else "unknown",
+                          # cctools strip has no version option; it is the one this Xcode ships.
+                          "version": xcode, "version_source": "xcodebuild -version (the Xcode that ships strip)",
                           "args": "-x"},
-                "codesign": {"identity": "ad-hoc (-s -)", "path": probe.which("codesign") or "unknown"}}
+                "codesign": {"path": codesign,
+                             "sha256": probe.sha256(codesign) if codesign != "unknown" else "unknown",
+                             "version": project.group(1) if project else "unknown",
+                             "version_source": "what(1) PROJECT tag",
+                             "identity": "ad-hoc (-s -)"}}
     if platform in ("linux", "android"):
         bundled = source_root / "third_party" / "llvm-build" / "Release+Asserts" / "bin" / "llvm-strip"
         path = str(bundled) if bundled.is_file() else (probe.which("llvm-strip") or "unknown")
         return {"strip": {"path": path, "sha256": probe.sha256(path) if path != "unknown" else "unknown",
-                          "version": probe.out([path, "--version"]).splitlines()[0]
+                          "version": version_line(probe.out([path, "--version"]))
                           if path != "unknown" else "unknown", "args": "strip-all"}}
     return {"strip": {"path": "none", "version": "none", "args": "not stripped (debug info is in the unshipped PDB)"}}
+
+
+def post_link_problems(platform: str, post_link: object) -> list[str]:
+    """Every post-link tool the platform runs must be recorded with usable evidence."""
+    problems: list[str] = []
+    rows = post_link if isinstance(post_link, dict) else {}
+    for tool in POST_LINK_TOOLS.get(platform, ()):
+        row = rows.get(tool)
+        if not isinstance(row, dict):
+            problems.append(f"post_link.{tool} is not recorded")
+            continue
+        for key, value in row.items():
+            text = str(value).strip()
+            if value is None or BAD_VALUE_RE.match(text) or text.lower().startswith("error"):
+                problems.append(f"post_link.{tool}.{key} = {value!r}")
+        if platform == "win" and tool == "strip" and row.get("path") == "none":
+            if not str(row.get("args", "")).strip():
+                problems.append("post_link.strip is none without saying why")
+            continue
+        if not HEX_64.match(str(row.get("sha256", ""))):
+            problems.append(f"post_link.{tool}.sha256 is not a SHA-256")
+        if str(row.get("path", "")).strip() in ("", "none", "unknown"):
+            problems.append(f"post_link.{tool}.path = {row.get('path')!r}")
+    return problems
 
 
 def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: str,
@@ -395,6 +444,8 @@ def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
 
     walk({key: receipt.get(key) for key in ("target", "runner", "compiler", "platform_sdk")}, "")
     walk({"linker": {"lld": (receipt.get("linker") or {}).get("lld")}}, "")
+    problems.extend(post_link_problems(str((receipt.get("target") or {}).get("platform", "")),
+                                       receipt.get("post_link")))
     if receipt.get("schema") != SCHEMA:
         problems.append(f"schema = {receipt.get('schema')!r}")
     target = receipt.get("target") or {}

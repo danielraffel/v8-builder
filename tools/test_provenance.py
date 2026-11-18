@@ -424,11 +424,15 @@ class FakeProbe(receipt_tool.Probe):
         if args[:2] == ["xcodebuild", "-version"]:
             return "Xcode 16.4\nBuild version 16F6"
         if args[:1] == ["xcrun"]:
+            if "--find" in args:
+                return "/Applications/Xcode.app/usr/bin/" + args[-1]
             return "15.5" if "--show-sdk-version" in args else "/Applications/Xcode.app/sdk"
+        if args[:1] == ["what"]:
+            return f"{args[1]}:\n\tPROGRAM:codesign  PROJECT:codesign-135.40.5\n"
         return "probe-output"
 
     def which(self, name):
-        return None
+        return "/usr/bin/codesign" if name == "codesign" else None
 
     def exists(self, path):
         return os.path.isfile(path)
@@ -565,6 +569,34 @@ def test_consumer_must_have_linked_the_packaged_bytes():
                                            linked=macho_dylib() + b"debug")
         assert receipt["consumer_link"]["linked_the_packaged_bytes"] is False
         expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
+
+
+def test_post_link_tools_need_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib())
+        post = receipt["post_link"]
+        assert post["strip"]["path"].endswith("/strip") and post["strip"]["version"].startswith("Xcode")
+        assert post["codesign"]["version"] == "codesign-135.40.5"
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        # Control: the banner Apple's strip gives for -V, which a receipt once carried.
+        post["strip"]["version"] = ("error: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/"
+                                    "XcodeDefault.xctoolchain/usr/bin/strip: unrecognized option: -V")
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "post_link.strip.version")
+        post["strip"]["version"] = "Xcode 16.4"
+        post["codesign"]["sha256"] = "unknown"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "post_link.codesign.sha256")
+        del post["codesign"]
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "post_link.codesign is not recorded")
+    linux = {"strip": {"path": "/x/llvm-strip", "sha256": "a" * 64, "version": "LLVM version 21.0.0",
+                       "args": "strip-all"}}
+    assert receipt_tool.post_link_problems("linux", linux) == []
+    linux["strip"]["path"] = "none"
+    expect_failure(receipt_tool.post_link_problems("android", linux), "post_link.strip.path")
+    assert receipt_tool.post_link_problems("win", {"strip": {
+        "path": "none", "version": "none", "args": "not stripped (debug info is in the unshipped PDB)"}}) == []
+    expect_failure(receipt_tool.post_link_problems("linux", {}), "post_link.strip is not recorded")
+    assert receipt_tool.version_line("llvm-strip, compatible with GNU strip\nLLVM (http://llvm.org/):\n"
+                                     "  LLVM version 21.0.0git\n") == "LLVM version 21.0.0git"
 
 
 def test_linux_receipt_refuses_a_newer_glibc_than_the_producer():
