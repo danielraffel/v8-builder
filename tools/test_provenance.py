@@ -438,7 +438,8 @@ class FakeProbe(receipt_tool.Probe):
 
 
 def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
-                    consumer: bytes | None = None) -> tuple[dict, Path]:
+                    consumer: bytes | None = None, ran: bool | None = None,
+                    ran_evidence: str | None = None) -> tuple[dict, Path]:
     out = tmp / "v8" / "out" / "mac-arm64"
     bin_dir = tmp / "v8" / "third_party" / "llvm-build" / "Release+Asserts" / "bin"
     out.mkdir(parents=True)
@@ -454,14 +455,20 @@ def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
     (out / "args.gn").write_text('target_cpu = "arm64"\ncc_wrapper = "ccache"\n')
     archive = write_zip(tmp / "v8-mac-arm64-x.zip", {
         "lib/libv8.dylib": library, "manifest.json": b'{"lib": "lib/libv8.dylib"}'})
+    evidence = None
+    if ran_evidence is not None:
+        evidence = tmp / "v8_identity_validator.ran"
+        if ran_evidence:
+            evidence.write_text(ran_evidence + "\n")
     consumer_path = None
     if consumer is not None:
         consumer_path = tmp / "v8_skia_validate"
         consumer_path.write_bytes(consumer)
     receipt = receipt_tool.build_receipt(
         archive, "mac", "arm64", "mac-arm64", out, tmp / "v8", probe=probe or FakeProbe(),
-        consumer=consumer_path, consumer_ran=consumer is not None,
-        consumer_note="" if consumer is not None else "no consumer for this cell")
+        consumer=consumer_path, consumer_ran=(consumer is not None) if ran is None else ran,
+        consumer_note="" if consumer is not None else "no consumer for this cell",
+        consumer_ran_evidence=evidence)
     return receipt, archive
 
 
@@ -506,6 +513,35 @@ def test_toolchain_receipt_controls():
         unrelated = macho_dylib(needed=("/usr/lib/libSystem.B.dylib",))
         receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=unrelated)
         expect_failure(receipt_tool.validate_receipt(receipt, archive), "does not load the library")
+
+
+def test_consumer_counts_as_run_only_with_evidence():
+    consumer = macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"))
+    consumer_sha = hashlib.sha256(consumer).hexdigest()
+    # A cross-built validator with no device: linked, recorded as not run.
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer, ran=False,
+                                           ran_evidence="")
+        row = receipt["consumer_link"]
+        assert (row["status"], row["ran"]) == ("linked", False), row
+        assert "was not written" in row["run"]
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        # Control: claiming a run the receipt has no evidence for.
+        row["status"] = "linked-and-ran"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "disagrees with ran")
+    # Evidence naming this binary: it ran.
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer, ran=False,
+                                           ran_evidence=consumer_sha)
+        assert (receipt["consumer_link"]["status"], receipt["consumer_link"]["ran"]) == ("linked-and-ran", True)
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+    # Evidence from another binary does not count, and evidence overrides a
+    # blanket claim that it ran.
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer, ran=True,
+                                           ran_evidence="0" * 64)
+        assert receipt["consumer_link"]["status"] == "linked"
+        assert "names another binary" in receipt["consumer_link"]["run"]
 
 
 def test_linux_receipt_refuses_a_newer_glibc_than_the_producer():

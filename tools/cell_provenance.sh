@@ -56,8 +56,11 @@ case "$mode" in
         consumer=(--consumer "$out/v8_identity_validator.exe" --consumer-library "$out/$lib"
                   --consumer-note "the GN identity validator linked v8.dll.lib here; it is cross-built and runs on a native arm64 Windows host") ;;
       android-*)
+        # build-v8.py writes v8_identity_validator.ran only after the validator ran
+        # and passed on an attached device; without one it is recorded as not run.
         consumer=(--consumer "$out/v8_identity_validator" --consumer-library "$out/$lib"
-                  --consumer-note "the GN identity validator linked libv8.so here; it is cross-built and runs on an arm64 device or emulator") ;;
+                  --consumer-ran-evidence "$out/v8_identity_validator.ran"
+                  --consumer-note "the GN identity validator linked libv8.so here; it is cross-built and runs only on an arm64 device or emulator, so it ran in this job only when one was attached") ;;
       linux-arm64)
         consumer=(--consumer-note "no consumer links in this job: the Skia coexistence harness is skipped for the linux/arm64 cell") ;;
       ios-*)

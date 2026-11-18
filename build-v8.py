@@ -16,6 +16,7 @@ Copyright (c) 2026 Daniel Raffel. MIT. Structure inspired by skia-builder (Oli L
 """
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -1495,6 +1496,11 @@ class V8Build:
         run(["bash", str(script), str(V8_DIR), str(out), str(pkg), level], env=self.env)
 
     def validate_android_identity(self, out, arch):
+        # <exe>.ran records that the validator ran on a device and passed: it holds the
+        # validator's sha256 and is written only after the adb run returns 0. The toolchain
+        # receipt reads it; without it the receipt records the validator as linked, not run.
+        ran_marker = out / "v8_identity_validator.ran"
+        ran_marker.unlink(missing_ok=True)
         run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
         exe = out / "v8_identity_validator"
         if not exe.exists():
@@ -1541,6 +1547,8 @@ class V8Build:
         run(["adb", "shell",
              f"cd {tmp} && chmod +x {exe.name} && "
              f"LD_LIBRARY_PATH={tmp} ./{exe.name}"], env=self.env)
+        ran_marker.write_text(hashlib.sha256(exe.read_bytes()).hexdigest() + "\n")
+        say(f"android identity validator ran on the device; wrote {ran_marker.name}")
 
     def run_all(self):
         # mac is proven (P1d). linux validates on a Linux CI runner; the Windows DLL lane

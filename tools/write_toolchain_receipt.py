@@ -18,7 +18,9 @@ tell whether its own toolchain and target OS are compatible:
   needed libraries, minimum OS, and on ELF the highest GLIBC_/GLIBCXX_
   version it references;
 * the consumer link: the validator that linked against this library in the
-  same job, when the cell has one, and whether it ran.
+  same job, when the cell has one, and whether it ran (``ran``; a validator
+  that runs only when a device is attached counts as run only when its run
+  left evidence naming it).
 
 ``--check`` fails when a field is empty or unknown, when the archive or the
 library member is not the one the receipt names, when the library is for
@@ -287,10 +289,23 @@ def post_link_tools(platform: str, source_root: Path, probe: Probe) -> dict[str,
 
 
 def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: str,
-                 library_sha256: str, linked_library: Path | None) -> dict[str, object]:
+                 library_sha256: str, linked_library: Path | None,
+                 ran_evidence: Path | None = None) -> dict[str, object]:
+    """``ran`` is the job's own word that the consumer ran and passed.  A
+    consumer that may or may not run in the job (a cross-built validator that
+    runs only when a device is attached) passes ``ran_evidence`` instead: a
+    file the run wrote after it passed, holding the consumer's sha256."""
     if consumer is None:
         return {"status": "none", "reason": note}
     data = consumer.read_bytes()
+    consumer_sha = hashlib.sha256(data).hexdigest()
+    run = "ran in this job" if ran else "not run in this job"
+    if ran_evidence is not None:
+        recorded = ran_evidence.read_text(encoding="utf-8").strip() if ran_evidence.is_file() else ""
+        ran = recorded == consumer_sha
+        run = (f"ran in this job ({ran_evidence.name} names this binary)" if ran else
+               f"not run in this job ({ran_evidence.name} " +
+               ("names another binary)" if recorded else "was not written)"))
     facts = binfacts.binary_facts(data)
     needed = [str(item) for item in facts.get("needed", [])]
     parts = PurePosixPath(library_member).parts
@@ -299,8 +314,10 @@ def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: st
     wanted = ("/".join(parts[-2:]) if framework else parts[-1]).lower()
     row: dict[str, object] = {
         "status": "linked-and-ran" if ran else "linked",
+        "ran": ran,
+        "run": run,
         "binary": consumer.name,
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": consumer_sha,
         "arch": facts.get("arch", "unknown"),
         "needed": needed,
         "references_library": any(item.lower().endswith(wanted) for item in needed),
@@ -316,7 +333,8 @@ def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: st
 def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: Path, source_root: Path,
                   probe: Probe | None = None, container_image: str = "", consumer: Path | None = None,
                   consumer_ran: bool = False, consumer_note: str = "",
-                  consumer_library: Path | None = None) -> dict[str, object]:
+                  consumer_library: Path | None = None,
+                  consumer_ran_evidence: Path | None = None) -> dict[str, object]:
     probe = probe or Probe()
     toolchain_ninja = out_dir / "toolchain.ninja"
     rules = toolchain_rules(toolchain_ninja.read_text(encoding="utf-8", errors="replace")) \
@@ -357,7 +375,7 @@ def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: P
                    if probe.which("ccache") else "none",
                    "cc_wrapper": "ccache" if "cc_wrapper" in args_text else "none"},
         "consumer_link": consumer_row(consumer, consumer_ran, consumer_note, member,
-                                      member_sha, consumer_library),
+                                      member_sha, consumer_library, consumer_ran_evidence),
     }
     return receipt
 
@@ -438,6 +456,10 @@ def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
     else:
         if not HEX_64.match(str(consumer.get("sha256", ""))):
             problems.append("consumer_link.sha256 is not a SHA-256")
+        if consumer.get("ran") is not (status == "linked-and-ran"):
+            problems.append(f"consumer_link.status {status!r} disagrees with ran = {consumer.get('ran')!r}")
+        if not str(consumer.get("run", "")).strip():
+            problems.append("consumer_link.run does not say whether the consumer ran")
         if consumer.get("references_library") is not True:
             problems.append("the consumer does not load the library")
         if ARCH_ALIASES.get(str(consumer.get("arch")), consumer.get("arch")) != ARCH_ALIASES.get(arch, arch):
@@ -472,6 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--consumer", type=Path, help="a validator that linked against this library")
     parser.add_argument("--consumer-library", type=Path, help="the library file the consumer linked")
     parser.add_argument("--consumer-ran", action="store_true", help="the consumer ran and passed")
+    parser.add_argument("--consumer-ran-evidence", type=Path,
+                        help="a file the consumer's run wrote after it passed, holding the consumer's sha256; "
+                             "the consumer counts as run only if it names this binary")
     parser.add_argument("--consumer-note", default="")
     parser.add_argument("--content-addressed-dir", type=Path)
     parser.add_argument("--check", action="store_true",
@@ -500,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt = build_receipt(args.archive, args.platform, args.arch, args.cell, args.out_dir,
                             args.source_root, container_image=args.container_image,
                             consumer=args.consumer, consumer_ran=args.consumer_ran,
-                            consumer_note=args.consumer_note, consumer_library=args.consumer_library)
+                            consumer_note=args.consumer_note, consumer_library=args.consumer_library,
+                            consumer_ran_evidence=args.consumer_ran_evidence)
     data = canonical_bytes(receipt)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)
