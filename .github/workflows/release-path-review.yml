@@ -75,11 +75,37 @@ jobs:
           mkdir -p scripts
           cp .release-path-rule/scripts/release_path_review.py .release-path-rule/scripts/counted_verdicts.py scripts/
 
+      # The pinned rule refuses a CODEOWNERS that names no files. Until the
+      # default branch's CODEOWNERS lists release-path files there is nothing to
+      # enforce: the gate passes without running the rule.
+      - name: Look for a release-path rule
+        id: rule
+        run: python3 -I tools/release_path_rule.py >> "$GITHUB_OUTPUT"
+
+      - name: Pass without a release-path rule
+        if: steps.rule.outputs.has_rule != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          sha="$HEAD_SHA"
+          if [[ "$EVENT_NAME" == issue_comment ]]; then
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)"
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "release-path-review: no head to post on"; exit 0; }
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$sha" \
+            -f state=success -f context=release-path-review \
+            -f description="no release-path rule in CODEOWNERS" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          echo "release-path-review: success on $sha: no release-path rule in CODEOWNERS"
+
       # Only the commit objects are fetched; nothing from the queue is checked
       # out or run. A failed fetch leaves the commit missing, which the rule
       # reports as `error`.
       - name: Fetch the merge-queue commit
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group'
+        if: steps.rule.outputs.has_rule == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
           QUEUE_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -92,12 +118,13 @@ jobs:
 
       - name: Decide release-path-review
         id: decide
+        if: steps.rule.outputs.has_rule == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I scripts/release_path_review.py
 
       - name: Post release-path-review
-        if: steps.decide.outputs.sha != ''
+        if: steps.rule.outputs.has_rule == 'true' && steps.decide.outputs.sha != ''
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.decide.outputs.sha }}
