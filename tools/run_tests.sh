@@ -33,6 +33,7 @@ TESTS=(
   tools/test_lean_packaging.py
   tools/test_release_asset_guard.py
   tools/test_release_path_gate.py
+  tools/test_zizmor_report_only.py
 )
 
 fail=0
