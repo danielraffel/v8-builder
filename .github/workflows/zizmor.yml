@@ -26,4 +26,5 @@ jobs:
           persona: regular
           inputs: .
       - name: Zizmor report (no exit codes)
+        continue-on-error: true
         run: uvx --from zizmor==1.32.0 zizmor --persona regular --no-exit-codes --format github .
