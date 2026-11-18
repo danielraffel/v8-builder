@@ -2,6 +2,10 @@
 reviewer_signers = ["pulp-review", "infra-review2"]
 reviewer_stamp_sessions = ["fleet-pass-reviewer-*"]
 fleet_review_required = true
+# A check that is not required and may be red or pending on a head GitHub
+# reports UNSTABLE that the Shipyard steward still merges. zizmor runs with
+# continue-on-error and only reports; it never gates.
+unstable_advisory_checks = ["zizmor (report only)"]
 
 [validation]
 pr_gates = false
