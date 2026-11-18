@@ -1,16 +1,10 @@
 name: Unit tests
 
 # Runs the seal-audit, release-gate, and release-asset-guard unit tests on
-# every PR that can change them. Pure Python; no V8 build.
+# every PR (it is a required check, so it must not be path-filtered). Pure
+# Python; no V8 build.
 on:
   pull_request:
-    paths:
-      - 'tools/**'
-      - 'seal/**'
-      - '.github/scripts/**'
-      - '.github/workflows/**'
-      - '.github/CODEOWNERS'
-      - '.shipyard/config.toml'
   push:
     branches: [main]
     paths:
