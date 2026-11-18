@@ -460,6 +460,15 @@ def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
             problems.append(f"consumer_link.status {status!r} disagrees with ran = {consumer.get('ran')!r}")
         if not str(consumer.get("run", "")).strip():
             problems.append("consumer_link.run does not say whether the consumer ran")
+        # The consumer proves this archive only if the file it linked is the
+        # packaged library: recompute that, rather than trust the flag.
+        linked = str(consumer.get("linked_library_sha256", ""))
+        if not HEX_64.match(linked):
+            problems.append("consumer_link.linked_library_sha256 is missing: "
+                            "the receipt does not say which bytes the consumer linked")
+        elif linked != library.get("sha256") or consumer.get("linked_the_packaged_bytes") is not True:
+            problems.append("the consumer linked other bytes than the packaged library "
+                            f"(linked {linked[:12]}, packaged {str(library.get('sha256'))[:12]})")
         if consumer.get("references_library") is not True:
             problems.append("the consumer does not load the library")
         if ARCH_ALIASES.get(str(consumer.get("arch")), consumer.get("arch")) != ARCH_ALIASES.get(arch, arch):

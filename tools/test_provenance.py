@@ -439,7 +439,7 @@ class FakeProbe(receipt_tool.Probe):
 
 def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
                     consumer: bytes | None = None, ran: bool | None = None,
-                    ran_evidence: str | None = None) -> tuple[dict, Path]:
+                    ran_evidence: str | None = None, linked: bytes | None = None) -> tuple[dict, Path]:
     out = tmp / "v8" / "out" / "mac-arm64"
     bin_dir = tmp / "v8" / "third_party" / "llvm-build" / "Release+Asserts" / "bin"
     out.mkdir(parents=True)
@@ -460,15 +460,18 @@ def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
         evidence = tmp / "v8_identity_validator.ran"
         if ran_evidence:
             evidence.write_text(ran_evidence + "\n")
-    consumer_path = None
+    consumer_path = linked_path = None
     if consumer is not None:
         consumer_path = tmp / "v8_skia_validate"
         consumer_path.write_bytes(consumer)
+        # The library file the consumer linked: the packaged bytes unless a test says otherwise.
+        linked_path = tmp / "linked-libv8.dylib"
+        linked_path.write_bytes(library if linked is None else linked)
     receipt = receipt_tool.build_receipt(
         archive, "mac", "arm64", "mac-arm64", out, tmp / "v8", probe=probe or FakeProbe(),
         consumer=consumer_path, consumer_ran=(consumer is not None) if ran is None else ran,
         consumer_note="" if consumer is not None else "no consumer for this cell",
-        consumer_ran_evidence=evidence)
+        consumer_ran_evidence=evidence, consumer_library=linked_path)
     return receipt, archive
 
 
@@ -542,6 +545,26 @@ def test_consumer_counts_as_run_only_with_evidence():
                                            ran_evidence="0" * 64)
         assert receipt["consumer_link"]["status"] == "linked"
         assert "names another binary" in receipt["consumer_link"]["run"]
+
+
+def test_consumer_must_have_linked_the_packaged_bytes():
+    consumer = macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"))
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer)
+        assert receipt["consumer_link"]["linked_the_packaged_bytes"] is True
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        # Control: the flag alone is not trusted; the digests must agree.
+        receipt["consumer_link"]["linked_library_sha256"] = "0" * 64
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
+        # Control: a linked consumer that does not say what it linked.
+        del receipt["consumer_link"]["linked_library_sha256"]
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked_library_sha256 is missing")
+    with tempfile.TemporaryDirectory() as tmp:
+        # Control: the consumer linked an unstripped copy, not the packaged library.
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer,
+                                           linked=macho_dylib() + b"debug")
+        assert receipt["consumer_link"]["linked_the_packaged_bytes"] is False
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
 
 
 def test_linux_receipt_refuses_a_newer_glibc_than_the_producer():
