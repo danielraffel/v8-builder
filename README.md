@@ -141,6 +141,39 @@ part of the public header/ABI contract and can change between V8 revisions.
 A multi-platform release is **single-SHA gated**: every artifact must name the same V8
 revision, or the release is rejected — so a downloaded set is never mixed-revision.
 
+### Provenance
+
+Each archive is packed in its own build job, reproducibly (sorted members, fixed
+timestamps and modes; `tools/package_cell.py`), and published with three records named
+after it and their own sha256. None of them changes the archive's bytes.
+
+| Asset | What it proves | Written by |
+|---|---|---|
+| `<archive>.legal-manifest.sha256-<digest>.json` | Every object the library's link consumed, traced through ninja's graph to its sources and to the nearest license file of each, with the license texts. Headers and `libc++.lib` members are matched by digest. Toolchain headers are listed separately with their digests. | `tools/write_legal_manifest.py` |
+| `<archive>.<apple\|linux\|android\|windows>-toolchain.sha256-<digest>.json` | The compiler, linker and post-link tools (path, sha256, version), the SDK, `args.gn`, the library's load-time facts read from the archive (machine, needed libraries, minimum OS, glibc floor) and the consumer link the cell's job performed. | `tools/write_toolchain_receipt.py` |
+| `<archive>.provenance-attestation.sha256-<digest>.sigstore.json` | A GitHub build-provenance attestation over every archive, record and `release-metadata.json`: which workflow, ref and commit produced them. | `actions/attest-build-provenance` in the `attest` job |
+
+Each build job proves its two records with `--check` (the archive digest, every zip
+member, no unresolved license gap, the library's architecture, OS and linker) and fails
+if either does not hold. The `attest` job, which runs no V8 code and is the only job with
+an OIDC grant, proves them again before signing. `release-metadata.json` maps each
+archive to its records under `provenance`.
+
+To verify an archive:
+
+```bash
+gh attestation verify v8-mac-arm64-<id>.zip --repo danielraffel/v8-builder
+python3 tools/write_legal_manifest.py <archive>.legal-manifest.sha256-<digest>.json --archive v8-mac-arm64-<id>.zip --check
+python3 tools/write_toolchain_receipt.py <archive>.apple-toolchain.sha256-<digest>.json --archive v8-mac-arm64-<id>.zip --check
+```
+
+A release cut before these records existed can be re-cut with them: dispatch
+`build-v8.yml` from `main` with `platforms=all`, `skip_release=false` and
+`release_tag=v8-<id>-attested.<n>`. The run takes the V8 revision, the pair lock and the
+Skia validation release from `v8-<id>`'s `release-metadata.json` and publishes a new
+release; `v8-<id>` is never touched. V8 builds are not byte-reproducible, so the re-cut's
+archives have new digests and consumers repin to them.
+
 ## Automatic releases
 
 A scheduled workflow ([`release-watch.yml`](.github/workflows/release-watch.yml)) polls
@@ -176,7 +209,8 @@ partially uploaded release is refused the same way for the assets already presen
 A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` and
 `replace_reason`. `replace_assets` is a comma-separated list of exact asset file names,
 or `ALL:<count>` for a full re-version, where the count must equal the number of assets
-the run publishes (8 zips plus `release-metadata.json`, so `ALL:9`); a wrong or missing
+the run publishes (8 zips, each with its three provenance records, plus
+`release-metadata.json`, so `ALL:33`); a wrong or missing
 count is refused, and every authorized name is printed. Only the named assets may change; the
 guard prints both digests, proves the new ones landed, and appends old and new sha256,
 the reason, the run, and the commit to an "Asset replacements" section in the release
