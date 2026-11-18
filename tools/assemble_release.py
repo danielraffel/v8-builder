@@ -7,12 +7,20 @@ their own sha256.  This step, which runs no V8 code, checks that the set is
 consistent and writes the two files that describe it:
 
 * ``release-metadata.json`` (schema 1): ``assets`` is the archive list,
-  ``manifests`` every archive's ``manifest.json``, and ``provenance`` maps
-  each archive to its legal manifest and toolchain receipt;
-* ``RELEASE_NOTES.md``.
+  ``manifests`` every archive's ``manifest.json``, ``provenance`` maps
+  each archive to its legal manifest and toolchain receipt, and
+  ``runtime_identity`` maps each archive to its receipt's
+  ``runtime_identity``: ``ran``, or ``not_run`` with the reason;
+* ``RELEASE_NOTES.md``, which labels every ``not_run`` cell
+  runtime-unverified.
+
+The archives' own ``manifest.json`` is written before the cell's validator
+runs, so the runtime label lives in the metadata and the notes, read from
+the receipt, which ``--check`` proves against the consumer link.
 
 It refuses a set where an archive lacks either record or has more than one,
-where a record names an archive that is not present, where the archives do
+where a record names an archive that is not present, where a receipt has
+no ``runtime_identity`` or claims a run its consumer link does not show, where the archives do
 not share one release id, or where the archives are not exactly the cells
 the dispatch selected (``--expect``, the workflow's ``platforms`` input). A
 selected cell that was skipped or failed upstream leaves its archive out, so
@@ -33,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_naming  # noqa: E402
+import write_toolchain_receipt  # noqa: E402
 
 EXPECTED = (
     "v8-mac-arm64", "v8-mac-x86_64", "v8-linux-arm64", "v8-linux-x64",
@@ -120,6 +129,10 @@ def assemble(release: Path, complete: bool = False, v8_version: str = "",
             if key not in row:
                 raise AssemblyError(f"{archive_name} has no {key}")
 
+    runtime: dict[str, dict[str, str]] = {}
+    for archive_name, row in provenance.items():
+        runtime[archive_name] = receipt_runtime_identity(release / row["toolchain_receipt"])
+
     for name, manifest in manifests.items():
         defines = manifest.get("consumer_defines")
         if (not isinstance(defines, list) or not defines or
@@ -134,15 +147,37 @@ def assemble(release: Path, complete: bool = False, v8_version: str = "",
         "pair": pair,
         "manifests": [manifests[archive.name] for archive in zips],
         "provenance": provenance,
+        "runtime_identity": runtime,
     }
     (release / "release-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     (release / "RELEASE_NOTES.md").write_text(
-        release_notes(str(first["display_version"]), pair, [manifests[a.name] for a in zips]),
+        release_notes(str(first["display_version"]), pair, [manifests[a.name] for a in zips],
+                      [runtime[a.name] for a in zips]),
         encoding="utf-8")
     return {"release_id": release_id, "title": first["title"], "display_version": first["display_version"]}
 
 
-def release_notes(version: str, pair: dict, manifests: list[dict]) -> str:
+def receipt_runtime_identity(path: Path) -> dict[str, str]:
+    """The receipt's ``runtime_identity``, refused when it is missing or claims
+    a run the receipt's own consumer link does not show."""
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise AssemblyError(f"{path.name} is not a readable receipt: {error}") from error
+    identity = receipt.get("runtime_identity") if isinstance(receipt, dict) else None
+    if not isinstance(identity, dict) or identity.get("status") not in ("ran", "not_run"):
+        raise AssemblyError(f"{path.name} records no runtime_identity")
+    supported = write_toolchain_receipt.runtime_identity(receipt.get("consumer_link") or {})
+    if identity["status"] != supported["status"]:
+        raise AssemblyError(f"{path.name} says runtime_identity {identity['status']!r}, "
+                            f"its consumer link supports {supported['status']!r}")
+    if identity["status"] == "not_run" and not str(identity.get("reason", "")).strip():
+        raise AssemblyError(f"{path.name} says runtime_identity not_run without a reason")
+    return {key: str(value) for key, value in identity.items()}
+
+
+def release_notes(version: str, pair: dict, manifests: list[dict],
+                  runtime: list[dict[str, str]]) -> str:
     lines = [f"**V8 {version}**: a sealed, embeddable, shared V8 that coexists with "
              f"Skia/Dawn (exports only `v8::`/`cppgc::`; ICU/zlib/Abseil kept internal). "
              f"`Intl` on. See the README for the ABI/consumer contract.\n"]
@@ -168,9 +203,10 @@ def release_notes(version: str, pair: dict, manifests: list[dict]) -> str:
                            ("Skia", "skia"), ("V8", "v8"), ("Dawn", "dawn")):
             lines.append(f"- {label}: `{pair.get(key, 'unknown')}`")
         lines.append("")
-    lines.append("| platform | arch | v8 | sealed | source | validation Skia |")
-    lines.append("|---|---|---|---|---|---|")
-    for manifest in manifests:
+    lines.append("| platform | arch | v8 | sealed | source | validation Skia | runtime identity |")
+    lines.append("|---|---|---|---|---|---|---|")
+    unverified: list[str] = []
+    for manifest, identity in zip(manifests, runtime):
         row_pair = manifest.get("pair", {}) or {}
         skia = row_pair.get("validated_skia_release") or row_pair.get("skia_release") or "-"
         source = row_pair.get("pair_kind") or row_pair.get("source") or "manual"
@@ -180,11 +216,22 @@ def release_notes(version: str, pair: dict, manifests: list[dict]) -> str:
         if plat == "ios":
             plat = f"ios ({manifest.get('ios_environment', '?')})"
             skia = "seal+ODR gate"
+        ran = identity.get("status") == "ran"
+        if not ran:
+            unverified.append(f"- {plat} {manifest.get('arch')}: {identity.get('reason', '')}")
         lines.append(f"| {plat} | {manifest.get('arch')} | {manifest.get('v8_version')} | "
-                     f"{'yes' if manifest.get('sealed') else 'NO'} | {source} | {skia} |")
+                     f"{'yes' if manifest.get('sealed') else 'NO'} | {source} | {skia} | "
+                     f"{'ran in the build job' if ran else '**runtime-unverified**'} |")
     lines.append("\nEvery artifact in this release names the same V8 revision "
-                 "(single-SHA gate). Each is build + seal-audited (0 ICU/zlib/Abseil "
-                 "exports) + identity-checked (no skip-pass).\n")
+                 "(single-SHA gate) and is built and seal-audited (0 ICU/zlib/Abseil exports). "
+                 "A cell whose runtime identity says *ran in the build job* had its identity "
+                 "validator (V8 init + eval + version) run against the packaged library in that job.\n")
+    if unverified:
+        lines.append("**Runtime-unverified cells.** These are published built, sealed and link-checked, "
+                     "but no identity validator ran against their packaged library in this release's "
+                     "build. Each cell's toolchain receipt records why:")
+        lines.extend(unverified)
+        lines.append("")
     lines.append("**Provenance.** Every archive is published with three records named after it: "
                  "`<archive>.legal-manifest.sha256-<digest>.json` (every linked object traced to its "
                  "sources and their license files, with the license texts), "

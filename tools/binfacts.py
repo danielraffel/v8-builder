@@ -26,6 +26,7 @@ MACHO_TOOLS = {1: "clang", 2: "swift", 3: "ld", 4: "lld"}
 PE_MACHINES = {0x8664: "x64", 0xAA64: "arm64", 0x014C: "x86", 0xA641: "arm64ec"}
 
 LC_ID_DYLIB = 0x0D
+LC_RPATH = 0x8000001C
 LC_LOAD_DYLIB = 0x0C
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LOAD_WEAK_DYLIB = 0x80000018
@@ -230,6 +231,57 @@ def pe_facts(data: bytes) -> dict[str, object]:
         cursor += 20
     facts["needed"] = sorted(needed, key=str.lower)
     return facts
+
+
+def load_paths(data: bytes) -> dict[str, list[str]]:
+    """The run-path search list a loader applies to this binary's dependencies.
+
+    Mach-O: every ``LC_RPATH`` (first slice of a fat file).  ELF:
+    ``DT_RPATH`` and ``DT_RUNPATH``, each split on ``:``.  PE has none; its
+    loader looks in the executable's own directory first.  Kept out of
+    :func:`binary_facts`, which describes the shipped library.
+    """
+    if data[:4] == b"\xca\xfe\xba\xbe":
+        _cpu, _sub, offset, size, _align = struct.unpack(">iiIII", data[8:28])
+        data = data[offset:offset + size]
+    if data[:4] == b"\xcf\xfa\xed\xfe":
+        ncmds = struct.unpack("<I", data[16:20])[0]
+        rpaths: list[str] = []
+        offset = 32
+        for _ in range(ncmds):
+            if offset + 8 > len(data):
+                break
+            cmd, cmdsize = struct.unpack("<II", data[offset:offset + 8])
+            if cmdsize < 8:
+                break
+            if cmd == LC_RPATH:
+                body = data[offset:offset + cmdsize]
+                rpaths.append(_cstr(body, struct.unpack("<I", body[8:12])[0]))
+            offset += cmdsize
+        return {"rpath": rpaths}
+    if data[:4] == b"\x7fELF" and len(data) >= 64 and data[4] == 2 and data[5] == 1:
+        shoff = struct.unpack("<Q", data[40:48])[0]
+        shentsize, shnum = struct.unpack("<HH", data[58:62])
+        sections = []
+        for index in range(shnum):
+            base = shoff + index * shentsize
+            if base + 64 > len(data):
+                break
+            sections.append(struct.unpack("<IIQQQQIIQQ", data[base:base + 64]))
+        found: dict[str, list[str]] = {"rpath": [], "runpath": []}
+        for _name, kind, _flags, _addr, offset, size, link, _info, _align, _entsize in sections:
+            if kind != 6 or link >= len(sections):  # SHT_DYNAMIC
+                continue
+            strtab = sections[link][4]
+            for entry in range(size // 16):
+                tag, value = struct.unpack("<qQ", data[offset + 16 * entry:offset + 16 * entry + 16])
+                if tag == 0:
+                    break
+                if tag in (15, 29):  # DT_RPATH, DT_RUNPATH
+                    key = "rpath" if tag == 15 else "runpath"
+                    found[key].extend(item for item in _cstr(data, strtab + value).split(":") if item)
+        return found
+    return {}
 
 
 def binary_facts(data: bytes) -> dict[str, object]:

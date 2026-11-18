@@ -34,30 +34,40 @@ import write_toolchain_receipt as receipt_tool  # noqa: E402
 # ------------------------------------------------------------- fixtures ----
 
 def macho_dylib(cputype: int = 0x0100000C, platform: int = 1, minos: int = 0x000B0000,
-                lld: str = "24.0.0", needed: tuple[str, ...] = ("/usr/lib/libSystem.B.dylib",)) -> bytes:
+                lld: str = "24.0.0", needed: tuple[str, ...] = ("/usr/lib/libSystem.B.dylib",),
+                rpaths: tuple[str, ...] = ()) -> bytes:
     def dylib_cmd(cmd: int, name: str) -> bytes:
         raw = name.encode() + b"\0"
         size = (24 + len(raw) + 7) & ~7
         return struct.pack("<IIIIII", cmd, size, 24, 0, 0, 0) + raw.ljust(size - 24, b"\0")
 
+    def rpath_cmd(path: str) -> bytes:
+        raw = path.encode() + b"\0"
+        size = (12 + len(raw) + 7) & ~7
+        return struct.pack("<III", 0x8000001C, size, 12) + raw.ljust(size - 12, b"\0")
+
     major, minor, patch = (int(part) for part in lld.split("."))
     build = struct.pack("<IIIIII", 0x32, 32, platform, minos, 0x000F0500, 1) + \
         struct.pack("<II", 4, (major << 16) | (minor << 8) | patch)
-    commands = [dylib_cmd(0x0D, "@rpath/libv8.dylib"), build] + [dylib_cmd(0x0C, item) for item in needed]
+    commands = [dylib_cmd(0x0D, "@rpath/libv8.dylib"), build] + [dylib_cmd(0x0C, item) for item in needed] + \
+        [rpath_cmd(item) for item in rpaths]
     body = b"".join(commands)
     header = struct.pack("<IiiIIII", 0xFEEDFACF, cputype, 0, 6, len(commands), len(body), 0) + b"\0" * 4
     return header + body + b"\0" * 64
 
 
 def elf_so(machine: int = 0x3E, needed: tuple[str, ...] = ("libc.so.6",),
-           versions: tuple[str, ...] = ("GLIBC_2.17", "GLIBC_2.34", "GLIBCXX_3.4.30")) -> bytes:
+           versions: tuple[str, ...] = ("GLIBC_2.17", "GLIBC_2.34", "GLIBCXX_3.4.30"),
+           soname: str = "libv8.so", runpath: str = "") -> bytes:
     dynstr = b"\0"
     offsets = {}
-    for text in ("libv8.so", *needed, *versions):
+    for text in (soname, *needed, *versions, *([runpath] if runpath else [])):
         offsets[text] = len(dynstr)
         dynstr += text.encode() + b"\0"
     dynamic = b"".join(struct.pack("<qQ", 1, offsets[item]) for item in needed)
-    dynamic += struct.pack("<qQ", 14, offsets["libv8.so"]) + struct.pack("<qQ", 0, 0)
+    if runpath:
+        dynamic += struct.pack("<qQ", 29, offsets[runpath])
+    dynamic += struct.pack("<qQ", 14, offsets[soname]) + struct.pack("<qQ", 0, 0)
     aux = b""
     for index, version in enumerate(versions):
         nxt = 16 if index < len(versions) - 1 else 0
@@ -441,9 +451,19 @@ class FakeProbe(receipt_tool.Probe):
         return hashlib.sha256(path.encode()).hexdigest()
 
 
+# A validator in <tmp>/bin that finds the library as @rpath/libv8.dylib through
+# @loader_path/../lib, which is where receipt_fixture puts the file it loads.
+CONSUMER_RPATH = "@loader_path/../lib"
+
+
+def macho_consumer(rpaths: tuple[str, ...] = (CONSUMER_RPATH,)) -> bytes:
+    return macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"), rpaths=rpaths)
+
+
 def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
                     consumer: bytes | None = None, ran: bool | None = None,
-                    ran_evidence: str | None = None, linked: bytes | None = None) -> tuple[dict, Path]:
+                    ran_evidence: str | None = None, linked: bytes | None = None,
+                    require_link_proof: bool = False) -> tuple[dict, Path]:
     out = tmp / "v8" / "out" / "mac-arm64"
     bin_dir = tmp / "v8" / "third_party" / "llvm-build" / "Release+Asserts" / "bin"
     out.mkdir(parents=True)
@@ -464,24 +484,25 @@ def receipt_fixture(tmp: Path, library: bytes, probe: FakeProbe | None = None,
         evidence = tmp / "v8_identity_validator.ran"
         if ran_evidence:
             evidence.write_text(ran_evidence + "\n")
-    consumer_path = linked_path = None
+    consumer_path = None
     if consumer is not None:
-        consumer_path = tmp / "v8_skia_validate"
+        (tmp / "bin").mkdir()
+        consumer_path = tmp / "bin" / "v8_skia_validate"
         consumer_path.write_bytes(consumer)
-        # The library file the consumer linked: the packaged bytes unless a test says otherwise.
-        linked_path = tmp / "linked-libv8.dylib"
-        linked_path.write_bytes(library if linked is None else linked)
+        # The file the consumer's loader finds: the packaged bytes unless a test says otherwise.
+        (tmp / "lib").mkdir()
+        (tmp / "lib" / "libv8.dylib").write_bytes(library if linked is None else linked)
     receipt = receipt_tool.build_receipt(
         archive, "mac", "arm64", "mac-arm64", out, tmp / "v8", probe=probe or FakeProbe(),
         consumer=consumer_path, consumer_ran=(consumer is not None) if ran is None else ran,
         consumer_note="" if consumer is not None else "no consumer for this cell",
-        consumer_ran_evidence=evidence, consumer_library=linked_path)
+        consumer_ran_evidence=evidence, require_link_proof=require_link_proof)
     return receipt, archive
 
 
 def test_toolchain_receipt_proves_its_archive():
     with tempfile.TemporaryDirectory() as tmp:
-        consumer = macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"))
+        consumer = macho_consumer()
         receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer)
         assert receipt_tool.validate_receipt(receipt, archive) == []
         assert receipt["compiler"]["cxx"]["path"].endswith("clang++")
@@ -523,7 +544,7 @@ def test_toolchain_receipt_controls():
 
 
 def test_consumer_counts_as_run_only_with_evidence():
-    consumer = macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"))
+    consumer = macho_consumer()
     consumer_sha = hashlib.sha256(consumer).hexdigest()
     # A cross-built validator with no device: linked, recorded as not run.
     with tempfile.TemporaryDirectory() as tmp:
@@ -551,24 +572,145 @@ def test_consumer_counts_as_run_only_with_evidence():
         assert "names another binary" in receipt["consumer_link"]["run"]
 
 
-def test_consumer_must_have_linked_the_packaged_bytes():
-    consumer = macho_dylib(needed=("@rpath/libv8.dylib", "/usr/lib/libSystem.B.dylib"))
+def test_consumer_link_is_proven_by_its_loader_not_a_named_path():
+    """Finding: the receipt trusted the path a caller named as the linked library.
+
+    The proof now follows the consumer's own loader entry through its own
+    run-path and hashes the file the loader would load."""
+    consumer = macho_consumer()
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer,
+                                           require_link_proof=True)
+        row = receipt["consumer_link"]
+        assert row["link_proof"] == "linked_packaged_bytes", row
+        assert row["loader"]["entry"] == "@rpath/libv8.dylib"
+        assert row["loader"]["resolves_to"] == str(Path(tmp).resolve() / "lib" / "libv8.dylib")
+        assert receipt["runtime_identity"]["status"] == "ran"
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        # Control: the recorded digest is recomputed against the packaged library.
+        row["loader"]["resolved_sha256"] = "0" * 64
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
+        del row["loader"]["resolved_sha256"]
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "resolved_sha256 is missing")
     with tempfile.TemporaryDirectory() as tmp:
         receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer)
-        assert receipt["consumer_link"]["linked_the_packaged_bytes"] is True
-        assert receipt_tool.validate_receipt(receipt, archive) == []
-        # Control: the flag alone is not trusted; the digests must agree.
-        receipt["consumer_link"]["linked_library_sha256"] = "0" * 64
-        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
-        # Control: a linked consumer that does not say what it linked.
-        del receipt["consumer_link"]["linked_library_sha256"]
-        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked_library_sha256 is missing")
+        row = receipt["consumer_link"]
+        # Control: a path outside the consumer's own search path.
+        row["loader"]["resolves_to"] = "/elsewhere/libv8.dylib"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "not in its search path")
     with tempfile.TemporaryDirectory() as tmp:
-        # Control: the consumer linked an unstripped copy, not the packaged library.
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer)
+        row = receipt["consumer_link"]
+        # Control: an entry the consumer does not have, or one naming another library.
+        row["loader"]["entry"] = "@rpath/libother.dylib"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "not one of the consumer's")
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "does not name the library")
+    with tempfile.TemporaryDirectory() as tmp:
+        # The HOLD's case: the consumer's loader finds a same-name library with
+        # other bytes (an unstripped copy). That is a mismatch, never a pass.
         receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=consumer,
                                            linked=macho_dylib() + b"debug")
-        assert receipt["consumer_link"]["linked_the_packaged_bytes"] is False
-        expect_failure(receipt_tool.validate_receipt(receipt, archive), "linked other bytes")
+        row = receipt["consumer_link"]
+        assert row["link_proof"] == "linked_other_bytes", row
+        assert receipt["runtime_identity"]["status"] == "not_run"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "link_proof = 'linked_other_bytes'")
+    with tempfile.TemporaryDirectory() as tmp:
+        # A consumer whose run-path does not lead to the library cannot prove
+        # which bytes it linked: linked_unverified, and not proven where required.
+        lost = macho_consumer(rpaths=("/nowhere",))
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=lost)
+        row = receipt["consumer_link"]
+        assert row["link_proof"] == "linked_unverified" and "does not resolve" in row["link_proof_reason"]
+        assert receipt["runtime_identity"]["status"] == "not_run"
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        row["link_proof"] = "linked_packaged_bytes"
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "resolved_sha256 is missing")
+    with tempfile.TemporaryDirectory() as tmp:
+        lost = macho_consumer(rpaths=("/nowhere",))
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=lost, require_link_proof=True)
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "must prove the packaged bytes")
+
+
+def test_elf_consumer_resolves_through_its_runpath():
+    library = elf_so()
+    lib_sha = hashlib.sha256(library).hexdigest()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "bin").mkdir()
+        (tmp / "lib").mkdir()
+        (tmp / "lib" / "libv8.so").write_bytes(library)
+        consumer = tmp / "bin" / "v8_skia_validate"
+        consumer.write_bytes(elf_so(needed=("libv8.so", "libc.so.6"), soname="validate",
+                                    runpath="$ORIGIN/../lib"))
+        assert binfacts.load_paths(consumer.read_bytes()) == {"rpath": [], "runpath": ["$ORIGIN/../lib"]}
+        row = receipt_tool.consumer_row(consumer, True, "", "lib/libv8.so", lib_sha,
+                                        binfacts.binary_facts(library))
+        assert row["link_proof"] == "linked_packaged_bytes", row
+        assert receipt_tool.link_proof_problems(row, {"member": "lib/libv8.so", "sha256": lib_sha,
+                                                      "facts": binfacts.binary_facts(library)}) == []
+        # Control: another soname is another library, whatever the file is called.
+        row = receipt_tool.consumer_row(consumer, True, "", "lib/libv8.so", lib_sha,
+                                        binfacts.binary_facts(elf_so(soname="libv8.so.2")))
+        assert row["references_library"] is False and row["link_proof"] == "linked_unverified"
+
+
+def test_android_runtime_identity_needs_a_device_run():
+    """Finding: with no adb or device the Android cell read as validated.
+
+    Without a passing run's marker the receipt records the runtime identity as
+    not run; with one, the library digest the run recorded is the link proof."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ran_marker
+    library = elf_so(machine=0xB7)
+    lib_sha = hashlib.sha256(library).hexdigest()
+    facts = binfacts.binary_facts(library)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        consumer = tmp / "v8_identity_validator"
+        consumer.write_bytes(elf_so(machine=0xB7, needed=("libv8.so", "libc.so"), soname="validator"))
+        marker = tmp / "v8_identity_validator.ran"
+        # No device: build-v8.py never writes the marker.
+        row = receipt_tool.consumer_row(consumer, False, "cross-built", "jniLibs/arm64-v8a/libv8.so",
+                                        lib_sha, facts, ran_evidence=marker)
+        assert (row["status"], row["link_proof"]) == ("linked", "linked_unverified"), row
+        identity = receipt_tool.runtime_identity(row)
+        assert identity["status"] == "not_run" and "was not written" in identity["reason"], identity
+        # A device run: the marker names the validator and the libv8.so it pushed.
+        pushed = tmp / "libv8.so"
+        pushed.write_bytes(library)
+        assert ran_marker.main(["write", str(marker), str(consumer), "--library", str(pushed)]) == 0
+        row = receipt_tool.consumer_row(consumer, False, "cross-built", "jniLibs/arm64-v8a/libv8.so",
+                                        lib_sha, facts, ran_evidence=marker)
+        assert (row["status"], row["link_proof"]) == ("linked-and-ran", "linked_packaged_bytes"), row
+        assert receipt_tool.runtime_identity(row)["status"] == "ran"
+        # Control: the run pushed other bytes.
+        pushed.write_bytes(library + b"x")
+        ran_marker.main(["write", str(marker), str(consumer), "--library", str(pushed)])
+        row = receipt_tool.consumer_row(consumer, False, "cross-built", "jniLibs/arm64-v8a/libv8.so",
+                                        lib_sha, facts, ran_evidence=marker)
+        assert row["link_proof"] == "linked_other_bytes"
+        assert receipt_tool.runtime_identity(row)["status"] == "not_run"
+        # A cleared marker does not survive into the next run.
+        ran_marker.main(["clear", str(marker)])
+        assert not marker.exists()
+
+
+def test_cross_built_validator_is_runtime_unverified():
+    """Finding: the win-arm64 validator is bundled but not run, yet the cell read
+    as identity-checked.  A linked consumer with no run is not_run, and the
+    receipt cannot claim otherwise."""
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, archive = receipt_fixture(Path(tmp), macho_dylib(), consumer=macho_consumer(),
+                                           ran=False, ran_evidence="", require_link_proof=True)
+        assert receipt["consumer_link"]["link_proof"] == "linked_packaged_bytes"
+        identity = receipt["runtime_identity"]
+        assert identity["status"] == "not_run" and "not run in this job" in identity["reason"], identity
+        assert receipt_tool.validate_receipt(receipt, archive) == []
+        # Control: a receipt that claims the run anyway.
+        receipt["runtime_identity"] = {"status": "ran", "evidence": "trust me"}
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "supports 'not_run'")
+        del receipt["runtime_identity"]
+        expect_failure(receipt_tool.validate_receipt(receipt, archive), "runtime_identity = None")
 
 
 def test_post_link_tools_need_evidence():
@@ -654,6 +796,67 @@ def test_android_ndk_revision_falls_back_to_deps():
         assert receipt_tool.android_ndk(root)["ndk_revision"] == "unknown"
 
 
+RAN_RECEIPT = {
+    "consumer_link": {"status": "linked-and-ran", "ran": True, "run": "ran in this job",
+                      "binary": "v8_skia_validate", "link_proof": "linked_packaged_bytes",
+                      "loader": {"resolves_to": "/w/build/mac-arm64/lib/libv8.dylib"}},
+    "runtime_identity": {"status": "ran", "evidence": "v8_skia_validate ran in this job"},
+}
+NOT_RUN_RECEIPT = {
+    "consumer_link": {"status": "linked", "ran": False, "run": "not run in this job",
+                      "binary": "v8_identity_validator.exe", "link_proof": "linked_packaged_bytes",
+                      "note": "cross-built"},
+    "runtime_identity": {"status": "not_run", "reason": "the consumer linked but was not run in this job"},
+}
+
+
+def test_release_labels_runtime_unverified_cells():
+    """Findings: the release read every cell as identity-checked.  The metadata
+    and notes now carry each receipt's runtime identity, and a receipt that
+    claims a run its consumer link does not show is refused."""
+    import assemble_release
+    pair = {"pair_kind": "chromium-milestone", "milestone": 158, "v8": "38351a002e2c" + "0" * 28}
+    rid = "m158-15.8.62.6-38351a002e2c"
+
+    def build(tmp: Path, receipts: dict[str, dict]) -> Path:
+        for cell, receipt in receipts.items():
+            manifest = {"v8_version": "15.8.62.6", "platform": cell.split("-")[1], "arch": cell.split("-")[2],
+                        "sealed": True, "consumer_defines": ["V8_COMPRESS_POINTERS"], "pair": pair}
+            write_zip(tmp / f"{cell}-{rid}.zip", {"manifest.json": json.dumps(manifest).encode()})
+            family = "apple" if "mac" in cell else "windows"
+            (tmp / f"{cell}-{rid}.legal-manifest.sha256-{'a' * 64}.json").write_text("{}")
+            (tmp / f"{cell}-{rid}.{family}-toolchain.sha256-{'b' * 64}.json").write_text(json.dumps(receipt))
+        return tmp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        release = build(Path(tmp), {"v8-mac-arm64": RAN_RECEIPT, "v8-win-arm64": NOT_RUN_RECEIPT})
+        assemble_release.assemble(release, expect="mac/arm64,win/arm64")
+        metadata = json.loads((release / "release-metadata.json").read_text())
+        assert metadata["runtime_identity"][f"v8-mac-arm64-{rid}.zip"]["status"] == "ran"
+        assert metadata["runtime_identity"][f"v8-win-arm64-{rid}.zip"]["status"] == "not_run"
+        notes = (release / "RELEASE_NOTES.md").read_text()
+        rows = {line.split("|")[1].strip() + "-" + line.split("|")[2].strip(): line
+                for line in notes.splitlines() if line.startswith("| mac") or line.startswith("| win")}
+        assert "ran in the build job" in rows["mac-arm64"], rows
+        assert "runtime-unverified" in rows["win-arm64"], rows
+        assert "- win arm64: the consumer linked but was not run in this job" in notes
+        assert "identity-checked (no skip-pass)" not in notes
+    for bad, needle in (({k: v for k, v in NOT_RUN_RECEIPT.items() if k != "runtime_identity"},
+                         "records no runtime_identity"),
+                        (dict(NOT_RUN_RECEIPT, runtime_identity={"status": "ran", "evidence": "x"}),
+                         "its consumer link supports 'not_run'"),
+                        (dict(NOT_RUN_RECEIPT, runtime_identity={"status": "not_run", "reason": " "}),
+                         "without a reason")):
+        with tempfile.TemporaryDirectory() as tmp:
+            release = build(Path(tmp), {"v8-mac-arm64": RAN_RECEIPT, "v8-win-arm64": bad})
+            try:
+                assemble_release.assemble(release)
+            except assemble_release.AssemblyError as error:
+                assert needle in str(error), (needle, str(error))
+            else:
+                raise AssertionError(f"a receipt was accepted: {needle}")
+
+
 def test_assemble_release_requires_both_records_per_archive():
     import assemble_release
     pair = {"pair_kind": "chromium-milestone", "milestone": 158, "v8": "38351a002e2c" + "0" * 28,
@@ -667,7 +870,8 @@ def test_assemble_release_requires_both_records_per_archive():
             write_zip(release / f"{cell}-{rid}.zip", {"manifest.json": json.dumps(manifest).encode()})
             family = "apple" if "mac" in cell else "windows"
             (release / f"{cell}-{rid}.legal-manifest.sha256-{'a' * 64}.json").write_text("{}")
-            (release / f"{cell}-{rid}.{family}-toolchain.sha256-{'b' * 64}.json").write_text("{}")
+            (release / f"{cell}-{rid}.{family}-toolchain.sha256-{'b' * 64}.json").write_text(
+                json.dumps(RAN_RECEIPT if "mac" in cell else NOT_RUN_RECEIPT))
         meta = assemble_release.assemble(release, complete=False)
         assert meta["release_id"] == rid
         metadata = json.loads((release / "release-metadata.json").read_text())
@@ -703,6 +907,45 @@ def test_assemble_release_requires_both_records_per_archive():
             assert "has no toolchain_receipt" in str(error)
         else:
             raise AssertionError("an archive without a receipt was accepted")
+
+
+# How each cell's release build can check its runtime identity: "always" runs
+# its validator in the job, "sometimes" only when a condition holds, "never" not
+# in the release build. Mirrors the consumer cases in tools/cell_provenance.sh.
+RUNTIME_IDENTITY = {
+    "mac-arm64": "sometimes", "mac-x86_64": "sometimes", "linux-x64": "sometimes",
+    "win-x64": "always", "win-arm64": "never", "android-arm64": "sometimes",
+    "linux-arm64": "never", "ios-simulator-arm64": "never",
+}
+
+
+def test_readme_claims_only_the_runtime_checks_each_cell_has():
+    """Finding: README claimed every cell proven by an identity check."""
+    import assemble_release
+    root = Path(__file__).resolve().parent.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "Each cell below is proven" not in readme
+    assert sorted(f"v8-{cell}" for cell in RUNTIME_IDENTITY) == sorted(assemble_release.EXPECTED)
+    rows = {}
+    for line in readme.splitlines():
+        cells = [part.strip() for part in line.split("|")[1:-1]]
+        if len(cells) == 3:
+            for name in cells[0].split(","):
+                rows[name.strip()] = cells[1]
+    for cell, kind in RUNTIME_IDENTITY.items():
+        assert cell in rows, f"README has no runtime identity row for {cell}"
+        text = rows[cell]
+        if kind == "always":
+            assert "runtime-unverified" not in text and text.startswith("runs"), (cell, text)
+        elif kind == "sometimes":
+            assert text.startswith("runs") and "otherwise runtime-unverified" in text, (cell, text)
+        else:
+            assert text.startswith("runtime-unverified"), (cell, text)
+    # A job never claims a run on its own word: every consumer that can run
+    # is counted as run only from its passing run's marker.
+    script = (root / "tools" / "cell_provenance.sh").read_text(encoding="utf-8")
+    assert "--consumer-ran " not in script and "--consumer-ran\n" not in script
+    assert script.count("--consumer-ran-evidence") == 3
 
 
 def test_recut_inputs_come_from_the_base_release():

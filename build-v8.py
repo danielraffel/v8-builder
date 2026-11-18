@@ -454,6 +454,13 @@ class Colors:
     OK = '\033[92m'; WARN = '\033[93m'; FAIL = '\033[91m'; END = '\033[0m'
 
 
+def write_ran_marker(marker, exe, library=None):
+    """Evidence that ``exe`` ran and passed, in tools/ran_marker.py's format."""
+    sys.path.insert(0, str(BASE_DIR / "tools"))
+    import ran_marker
+    marker.write_text(ran_marker.marker_text(exe, library), encoding="utf-8")
+
+
 def say(msg, c=Colors.OK):
     print(f"{c}[v8-builder] {msg}{Colors.END}", flush=True)
 
@@ -1417,6 +1424,12 @@ class V8Build:
         say("injected v8_identity_validator gn target")
 
     def validate_win_identity(self, out, arch):
+        # <exe>.ran records that the validator ran here and passed (see
+        # tools/ran_marker.py). It is deleted first and written only after the run
+        # returns 0, so a cross-built validator that did not run leaves none, and the
+        # toolchain receipt records the cell's runtime identity as not run.
+        ran_marker = out / "v8_identity_validator.ran"
+        ran_marker.unlink(missing_ok=True)
         run(["ninja", "-C", str(out), "v8_identity_validator"], cwd=V8_DIR, env=self.env)
         exe = out / "v8_identity_validator.exe"
         if not exe.exists():
@@ -1434,12 +1447,14 @@ class V8Build:
             shutil.copy2(exe, vdir / exe.name)
             shutil.copy2(out / "v8.dll", vdir / "v8.dll")
             say(f"cross-build (target {gn_cpu(arch)} != host {host}): validator + v8.dll "
-                f"bundled into {vdir.name}/ — run on a native {gn_cpu(arch)} Windows host",
+                f"bundled into {vdir.name}/ — run on a native {gn_cpu(arch)} Windows host. "
+                f"NOT RUN here: the release labels this cell runtime-unverified",
                 Colors.WARN)
             return
         # v8.dll is co-located in `out`, so the exe finds it on the default DLL search.
         say("running Windows identity validator (V8 init + eval + version)")
         run([str(exe)], cwd=out, env=self.env)
+        write_ran_marker(ran_marker, exe)
 
     # Android identity validator, built AS A GN TARGET (the inject_win_validator ELF
     # analog): an executable("v8_identity_validator") deps :v8_sealed_shared and compiles
@@ -1523,7 +1538,8 @@ class V8Build:
         # If an adb device/emulator matching the target abi is reachable, run it now.
         if not shutil.which("adb"):
             say(f"no adb in PATH: validator + {libname} bundled into {vdir.name}/ — "
-                f"run on an arm64 android emulator/device", Colors.WARN)
+                f"run on an arm64 android emulator/device"
+                f". NOT RUN here: the release labels this cell runtime-unverified", Colors.WARN)
             return
         abi_out = subprocess.run(
             ["adb", "shell", "getprop", "ro.product.cpu.abi"],
@@ -1533,11 +1549,13 @@ class V8Build:
                     "arm": "armeabi-v7a", "x86": "x86"}.get(arch, arch)
         if abi_out.returncode != 0 or not dev_abi:
             say(f"no adb device reachable: validator + {libname} bundled into "
-                f"{vdir.name}/ — run on an arm64 android emulator/device", Colors.WARN)
+                f"{vdir.name}/ — run on an arm64 android emulator/device"
+                f". NOT RUN here: the release labels this cell runtime-unverified", Colors.WARN)
             return
         if dev_abi != want_abi:
             say(f"adb device abi '{dev_abi}' != target '{want_abi}': cannot run "
-                f"{want_abi} validator here; bundled into {vdir.name}/", Colors.WARN)
+                f"{want_abi} validator here; bundled into {vdir.name}/"
+                f". NOT RUN here: the release labels this cell runtime-unverified", Colors.WARN)
             return
         tmp = "/data/local/tmp/v8val"
         say(f"running android identity validator on device (abi {dev_abi})")
@@ -1547,7 +1565,9 @@ class V8Build:
         run(["adb", "shell",
              f"cd {tmp} && chmod +x {exe.name} && "
              f"LD_LIBRARY_PATH={tmp} ./{exe.name}"], env=self.env)
-        ran_marker.write_text(hashlib.sha256(exe.read_bytes()).hexdigest() + "\n")
+        # The run loaded the pushed copies through LD_LIBRARY_PATH, not the validator's
+        # run-path, so the marker names the exact files pushed: the exe and libv8.so.
+        write_ran_marker(ran_marker, vdir / exe.name, library=vdir / libname)
         say(f"android identity validator ran on the device; wrote {ran_marker.name}")
 
     def run_all(self):

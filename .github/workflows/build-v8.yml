@@ -406,7 +406,11 @@ jobs:
             "-DV8_CONSUMER_DEFINES=$V8_DEFINES" \
             -DEXPECTED_V8_VERSION="$(python3 -c "import json;print(json.load(open('build/${{ matrix.platform }}-${{ matrix.arch }}/manifest.json'))['v8_version'])")"
           cmake --build validate/build
+          # The marker is the receipt's evidence that this run passed: cleared
+          # first, written only after the validator exits 0.
+          python3 tools/ran_marker.py clear validate/build/v8_skia_validate.ran
           "${PRE[@]}" ./validate/build/v8_skia_validate
+          python3 tools/ran_marker.py write validate/build/v8_skia_validate.ran validate/build/v8_skia_validate
       # The archive is written here, next to the toolchain and the ninja
       # graph that produced it, so its legal manifest and toolchain receipt
       # are written against the exact bytes a release publishes. A record
@@ -612,7 +616,9 @@ jobs:
             "-DV8_CONSUMER_DEFINES=$V8_DEFINES" \
             -DEXPECTED_V8_VERSION="$VER"
           cmake --build validate/build
+          python3 tools/ran_marker.py clear validate/build/v8_skia_validate.ran
           ./validate/build/v8_skia_validate
+          python3 tools/ran_marker.py write validate/build/v8_skia_validate.ran validate/build/v8_skia_validate
       - name: Package archive and write provenance records
         if: steps.sel.outputs.go == 'true'
         env:

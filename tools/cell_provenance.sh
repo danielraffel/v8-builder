@@ -39,32 +39,34 @@ case "$mode" in
     member="${paths%%$'\t'*}"
     lib="${paths#*$'\t'}"
     # The consumer link a cell's own job performs, if any. A receipt without
-    # one says why.
+    # one says why. A consumer counts as run only when the marker its passing
+    # run wrote (tools/ran_marker.py) names it. --require-link-proof: the
+    # consumer's loader entry must resolve, through its own run-path, to the
+    # packaged bytes, or the receipt does not prove. Android's validator runs
+    # on a device through LD_LIBRARY_PATH, so its proof is the library digest
+    # in the run's marker, and without a run it is recorded linked_unverified.
     consumer=()
     case "$cell" in
       mac-*|linux-x64)
         if [ -f validate/build/v8_skia_validate ]; then
-          consumer=(--consumer validate/build/v8_skia_validate --consumer-library "build/$cell/$member"
-                    --consumer-ran --consumer-note "the Skia coexistence validator (forced-collision link and V8 identity) linked the packaged library and ran in this job")
+          consumer=(--consumer validate/build/v8_skia_validate --require-link-proof
+                    --consumer-ran-evidence validate/build/v8_skia_validate.ran
+                    --consumer-note "the Skia coexistence validator (forced-collision link and V8 identity), run by this job's coexistence step")
         else
           consumer=(--consumer-note "the Skia coexistence validator did not build in this job (no skia-builder asset was reachable); the seal audit and the glibc floor gate are the checks")
         fi ;;
-      win-x64)
-        consumer=(--consumer "$out/v8_identity_validator.exe" --consumer-library "$out/$lib" --consumer-ran
-                  --consumer-note "the GN identity validator linked v8.dll.lib and ran in this job") ;;
-      win-arm64)
-        consumer=(--consumer "$out/v8_identity_validator.exe" --consumer-library "$out/$lib"
-                  --consumer-note "the GN identity validator linked v8.dll.lib here; it is cross-built and runs on a native arm64 Windows host") ;;
+      win-x64|win-arm64)
+        consumer=(--consumer "$out/v8_identity_validator.exe" --require-link-proof
+                  --consumer-ran-evidence "$out/v8_identity_validator.ran"
+                  --consumer-note "the GN identity validator linked v8.dll.lib; build-v8.py runs it only when the runner's arch is the cell's (win-arm64 is cross-built on x64 and is not run)") ;;
       android-*)
-        # build-v8.py writes v8_identity_validator.ran only after the validator ran
-        # and passed on an attached device; without one it is recorded as not run.
-        consumer=(--consumer "$out/v8_identity_validator" --consumer-library "$out/$lib"
+        consumer=(--consumer "$out/v8_identity_validator"
                   --consumer-ran-evidence "$out/v8_identity_validator.ran"
                   --consumer-note "the GN identity validator linked libv8.so here; it is cross-built and runs only on an arm64 device or emulator, so it ran in this job only when one was attached") ;;
       linux-arm64)
         consumer=(--consumer-note "no consumer links in this job: the Skia coexistence harness is skipped for the linux/arm64 cell") ;;
       ios-*)
-        consumer=(--consumer-note "no consumer links in this job: the Simulator ODR gate (validate/ios) is the iOS consumer check and the Mach-O seal audit is the coexistence check") ;;
+        consumer=(--consumer-note "no consumer runs in this job: the Simulator ODR gate (validate/ios) is run outside the release workflow, and the Mach-O seal audit is the coexistence check") ;;
     esac
     image=()
     [ -n "$container" ] && image=(--container-image "$container")

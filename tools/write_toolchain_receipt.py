@@ -19,15 +19,23 @@ tell whether its own toolchain and target OS are compatible:
   needed libraries, minimum OS, and on ELF the highest GLIBC_/GLIBCXX_
   version it references;
 * the consumer link: the validator that linked against this library in the
-  same job, when the cell has one, and whether it ran (``ran``; a validator
-  that runs only when a device is attached counts as run only when its run
-  left evidence naming it).
+  same job, when the cell has one; whether it ran (only when the file its
+  passing run wrote names this binary); and ``link_proof``: the consumer's
+  loader entry for the library, resolved through the consumer's own run-path
+  (or the library digest its passing run recorded), and whether those are the
+  packaged bytes (``linked_packaged_bytes``) or cannot be shown to be
+  (``linked_unverified``, with the reason);
+* ``runtime_identity``: ``ran`` only when that consumer ran and loaded the
+  packaged bytes, else ``not_run`` with the reason.  A release labels a
+  ``not_run`` cell runtime-unverified.
 
-``--check`` fails when a field is empty or unknown, when the archive or the
-library member is not the one the receipt names, when the library is for
-another architecture or OS, when a Mach-O library was linked by a different
-lld than the receipt names, or when an ELF library needs a newer glibc than
-the producer had.  A receipt that does not match its archive is worse than
+``--check`` fails when a field is empty or unknown, when the consumer link
+claims the packaged bytes but its loader entry, search path or digest says
+otherwise, when ``runtime_identity`` claims more than the consumer link
+shows, when the archive or the library member is not the one the receipt
+names, when the library is for another architecture or OS, when a Mach-O
+library was linked by a different lld than the receipt names, or when an ELF
+library needs a newer glibc than the producer had.  A receipt that does not match its archive is worse than
 none.
 
 Published as ``<archive stem>.<family>-toolchain.sha256-<digest>.json`` with
@@ -337,30 +345,119 @@ def post_link_problems(platform: str, post_link: object) -> list[str]:
     return problems
 
 
+LINK_PROOFS = {"linked_packaged_bytes", "linked_unverified"}
+RUNTIME_STATUSES = {"ran", "not_run"}
+
+
+def read_ran_evidence(path: Path | None) -> tuple[str, str]:
+    """``(consumer sha256, library sha256)`` from a run's evidence file.
+
+    The run writes the file only after it passed: the consumer's sha256 on the
+    first line and, when the run loaded the library by a path the consumer's
+    own run-path does not name (``LD_LIBRARY_PATH`` on an Android device), a
+    second line ``library <sha256>`` for the library file it loaded.
+    """
+    if path is None or not path.is_file():
+        return "", ""
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    consumer = lines[0] if lines else ""
+    library = ""
+    for line in lines[1:]:
+        key, _, value = line.partition(" ")
+        if key == "library":
+            library = value.strip()
+    return consumer, library
+
+
+def library_identity(library_member: str, facts: dict) -> str:
+    """The name a consumer's loader entry carries for this library: the Mach-O
+    install name, the ELF soname, or the PE file name."""
+    if facts.get("format") == "mach-o-fat":
+        slices = facts.get("slices") or [{}]
+        return str(slices[0].get("install_name", ""))
+    if facts.get("format") == "mach-o":
+        return str(facts.get("install_name", ""))
+    if facts.get("format") == "elf":
+        return str(facts.get("soname", ""))
+    return PurePosixPath(library_member).name
+
+
+def entry_names_library(entry: str, identity: str, fmt: str) -> bool:
+    if not entry or not identity:
+        return False
+    if fmt == "pe":
+        return PurePosixPath(entry.replace("\\", "/")).name.lower() == identity.lower()
+    return entry == identity
+
+
+def substitute_origin(directory: str, consumer_dir: str) -> str:
+    for token in ("@loader_path", "@executable_path", "${ORIGIN}", "$ORIGIN"):
+        directory = directory.replace(token, consumer_dir)
+    return os.path.normpath(directory)
+
+
+def search_dirs(fmt: str, entry: str, paths: dict, consumer_dir: str) -> tuple[list[str], str]:
+    """The directories the loader searches for ``entry``, in its order, and the
+    path inside each, from the consumer's own load commands only."""
+    if fmt.startswith("mach-o"):
+        if entry.startswith("@rpath/"):
+            return [substitute_origin(item, consumer_dir) for item in paths.get("rpath", [])], entry[7:]
+        if entry.startswith(("@loader_path/", "@executable_path/")):
+            head, _, rest = entry.partition("/")
+            return [substitute_origin(head, consumer_dir)], rest
+        return [os.path.dirname(entry)], os.path.basename(entry)
+    if fmt == "elf":
+        if "/" in entry:
+            return [substitute_origin(os.path.dirname(entry), consumer_dir)], os.path.basename(entry)
+        # DT_RUNPATH replaces DT_RPATH when both are present.
+        dirs = paths.get("runpath") or paths.get("rpath") or []
+        return [substitute_origin(item, consumer_dir) for item in dirs], entry
+    if fmt == "pe":
+        # The application directory is searched first for a DLL that is not a known DLL.
+        return [consumer_dir], PurePosixPath(entry.replace("\\", "/")).name
+    return [], entry
+
+
 def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: str,
-                 library_sha256: str, linked_library: Path | None,
-                 ran_evidence: Path | None = None) -> dict[str, object]:
-    """``ran`` is the job's own word that the consumer ran and passed.  A
-    consumer that may or may not run in the job (a cross-built validator that
-    runs only when a device is attached) passes ``ran_evidence`` instead: a
-    file the run wrote after it passed, holding the consumer's sha256."""
+                 library_sha256: str, library_facts: dict | None = None,
+                 ran_evidence: Path | None = None,
+                 require_link_proof: bool = False) -> dict[str, object]:
+    """The consumer that linked against this library in the job, and what the
+    receipt can prove about it.
+
+    ``ran`` is the job's own word that the consumer ran; when ``ran_evidence``
+    is given it replaces that word: the consumer counts as run only when the
+    file its passing run wrote names this binary.
+
+    ``link_proof`` is ``linked_packaged_bytes`` only when the loader entry
+    that names this library, resolved through the consumer's own run-path (or
+    the library digest a passing run recorded), is a file whose bytes are the
+    packaged library.  Otherwise it is ``linked_unverified`` with the reason,
+    and with ``require_link_proof`` the receipt does not prove.
+    """
     if consumer is None:
         return {"status": "none", "reason": note}
     data = consumer.read_bytes()
     consumer_sha = hashlib.sha256(data).hexdigest()
     run = "ran in this job" if ran else "not run in this job"
+    evidence_library = ""
     if ran_evidence is not None:
-        recorded = ran_evidence.read_text(encoding="utf-8").strip() if ran_evidence.is_file() else ""
+        recorded, evidence_library = read_ran_evidence(ran_evidence)
         ran = recorded == consumer_sha
+        if not ran:
+            evidence_library = ""
         run = (f"ran in this job ({ran_evidence.name} names this binary)" if ran else
                f"not run in this job ({ran_evidence.name} " +
                ("names another binary)" if recorded else "was not written)"))
     facts = binfacts.binary_facts(data)
+    fmt = str(facts.get("format", "unknown"))
     needed = [str(item) for item in facts.get("needed", [])]
-    parts = PurePosixPath(library_member).parts
-    # A framework binary is loaded as <Name>.framework/<Name>, anything else by its file name.
-    framework = len(parts) >= 2 and parts[-2] == parts[-1] + ".framework"
-    wanted = ("/".join(parts[-2:]) if framework else parts[-1]).lower()
+    if fmt == "mach-o-fat":
+        first = (facts.get("slices") or [{}])[0]
+        needed = [str(item) for item in first.get("needed", [])]
+    identity = library_identity(library_member, library_facts or {})
+    entries = [item for item in needed if entry_names_library(item, identity, fmt)]
+    consumer_dir = str(consumer.resolve().parent)
     row: dict[str, object] = {
         "status": "linked-and-ran" if ran else "linked",
         "ran": ran,
@@ -368,22 +465,74 @@ def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: st
         "binary": consumer.name,
         "sha256": consumer_sha,
         "arch": facts.get("arch", "unknown"),
+        "format": fmt,
         "needed": needed,
-        "references_library": any(item.lower().endswith(wanted) for item in needed),
+        "library_identity": identity,
+        "references_library": bool(entries),
+        "link_proof_required": require_link_proof,
         "note": note,
     }
-    if linked_library is not None and linked_library.is_file():
-        linked = sha256_file(linked_library)
-        row["linked_library_sha256"] = linked
-        row["linked_the_packaged_bytes"] = linked == library_sha256
+    loader: dict[str, object] = {"entry": entries[0] if entries else "", "search": [], "resolves_to": ""}
+    proof, reason = "linked_unverified", ""
+    if not entries:
+        reason = f"the consumer has no loader entry naming {identity or 'the library'}"
+    else:
+        dirs, tail = search_dirs(fmt, entries[0], binfacts.load_paths(data), consumer_dir)
+        loader["search"] = dirs
+        for directory in dirs:
+            candidate = os.path.join(directory, tail)
+            if os.path.isfile(candidate):
+                loader["resolves_to"] = os.path.normpath(candidate)
+                loader["resolved_sha256"] = sha256_file(Path(candidate))
+                break
+        if loader["resolves_to"]:
+            loader["how"] = "the consumer's own run-path (no loader environment)"
+            if loader["resolved_sha256"] == library_sha256:
+                proof = "linked_packaged_bytes"
+            else:
+                proof = "linked_other_bytes"
+                reason = "the consumer's loader entry resolves to other bytes than the packaged library"
+        elif evidence_library:
+            loader["how"] = f"{ran_evidence.name}: the passing run recorded the library it loaded"
+            loader["resolved_sha256"] = evidence_library
+            if evidence_library == library_sha256:
+                proof = "linked_packaged_bytes"
+            else:
+                proof = "linked_other_bytes"
+                reason = "the run loaded other bytes than the packaged library"
+        else:
+            reason = (f"{entries[0]} does not resolve through the consumer's own run-path "
+                      f"(searched {dirs or 'nothing'}), and no passing run recorded the library it loaded")
+    row["loader"] = loader
+    row["link_proof"] = proof
+    if reason:
+        row["link_proof_reason"] = reason
     return row
+
+
+def runtime_identity(consumer_link: dict) -> dict[str, str]:
+    """Whether this cell's V8 identity check ran in the job against the
+    packaged bytes: ``ran`` needs a consumer that ran and loaded the packaged
+    library; anything less is ``not_run`` with the reason."""
+    status = consumer_link.get("status")
+    if status == "none":
+        return {"status": "not_run", "reason": str(consumer_link.get("reason", "")).strip()}
+    if consumer_link.get("ran") is not True:
+        return {"status": "not_run", "reason": f"the consumer linked but was {consumer_link.get('run')}: "
+                                               f"{consumer_link.get('note', '')}".strip()}
+    if consumer_link.get("link_proof") != "linked_packaged_bytes":
+        return {"status": "not_run",
+                "reason": "the consumer ran, but the receipt cannot prove it loaded the packaged library: "
+                          f"{consumer_link.get('link_proof_reason', '')}".strip()}
+    return {"status": "ran", "evidence": f"{consumer_link.get('binary')} {consumer_link.get('run')}, "
+                                         f"loading {(consumer_link.get('loader') or {}).get('resolves_to') or 'the packaged library'}"}
 
 
 def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: Path, source_root: Path,
                   probe: Probe | None = None, container_image: str = "", consumer: Path | None = None,
                   consumer_ran: bool = False, consumer_note: str = "",
-                  consumer_library: Path | None = None,
-                  consumer_ran_evidence: Path | None = None) -> dict[str, object]:
+                  consumer_ran_evidence: Path | None = None,
+                  require_link_proof: bool = False) -> dict[str, object]:
     probe = probe or Probe()
     toolchain_ninja = out_dir / "toolchain.ninja"
     rules = toolchain_rules(toolchain_ninja.read_text(encoding="utf-8", errors="replace")) \
@@ -424,9 +573,55 @@ def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: P
                    if probe.which("ccache") else "none",
                    "cc_wrapper": "ccache" if "cc_wrapper" in args_text else "none"},
         "consumer_link": consumer_row(consumer, consumer_ran, consumer_note, member,
-                                      member_sha, consumer_library, consumer_ran_evidence),
+                                      member_sha, binfacts.binary_facts(data), consumer_ran_evidence,
+                                      require_link_proof),
     }
+    receipt["runtime_identity"] = runtime_identity(receipt["consumer_link"])
     return receipt
+
+
+def link_proof_problems(consumer: dict, library: dict) -> list[str]:
+    """Recompute what the consumer link claims from the receipt's own fields."""
+    problems: list[str] = []
+    proof = consumer.get("link_proof")
+    if proof not in LINK_PROOFS:
+        problems.append(f"consumer_link.link_proof = {proof!r}: "
+                        + str(consumer.get("link_proof_reason", "not one of " + str(sorted(LINK_PROOFS)))))
+        return problems
+    identity = library_identity(str(library.get("member", "")), library.get("facts") or {})
+    if consumer.get("library_identity") != identity:
+        problems.append(f"consumer_link.library_identity {consumer.get('library_identity')!r} "
+                        f"is not the library's {identity!r}")
+    if proof == "linked_unverified":
+        if consumer.get("link_proof_required") is not False:
+            problems.append("the consumer link must prove the packaged bytes for this cell: "
+                            + str(consumer.get("link_proof_reason", "")))
+        if not str(consumer.get("link_proof_reason", "")).strip():
+            problems.append("consumer_link is linked_unverified without a reason")
+        return problems
+    loader = consumer.get("loader") or {}
+    entry = str(loader.get("entry", ""))
+    fmt = str(consumer.get("format", ""))
+    if entry not in [str(item) for item in consumer.get("needed", [])]:
+        problems.append(f"consumer_link.loader.entry {entry!r} is not one of the consumer's loader entries")
+    if not entry_names_library(entry, identity, fmt):
+        problems.append(f"consumer_link.loader.entry {entry!r} does not name the library {identity!r}")
+    resolved = str(loader.get("resolves_to", ""))
+    if resolved:
+        _dirs, tail = search_dirs(fmt, entry, {}, "")
+        if not any(os.path.normpath(os.path.join(str(d), tail)) == resolved
+                   for d in loader.get("search", []) or []):
+            problems.append(f"consumer_link.loader.resolves_to {resolved!r} is not in its search path")
+    elif not str(loader.get("how", "")).strip():
+        problems.append("consumer_link.loader says neither where the library resolved nor how it was loaded")
+    digest = str(loader.get("resolved_sha256", ""))
+    if not HEX_64.match(digest):
+        problems.append("consumer_link.loader.resolved_sha256 is missing: "
+                        "the receipt does not say which bytes the consumer loaded")
+    elif digest != library.get("sha256"):
+        problems.append("the consumer linked other bytes than the packaged library "
+                        f"(loaded {digest[:12]}, packaged {str(library.get('sha256'))[:12]})")
+    return problems
 
 
 def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
@@ -511,19 +706,21 @@ def validate_receipt(receipt: dict, archive: Path | None = None) -> list[str]:
             problems.append(f"consumer_link.status {status!r} disagrees with ran = {consumer.get('ran')!r}")
         if not str(consumer.get("run", "")).strip():
             problems.append("consumer_link.run does not say whether the consumer ran")
-        # The consumer proves this archive only if the file it linked is the
-        # packaged library: recompute that, rather than trust the flag.
-        linked = str(consumer.get("linked_library_sha256", ""))
-        if not HEX_64.match(linked):
-            problems.append("consumer_link.linked_library_sha256 is missing: "
-                            "the receipt does not say which bytes the consumer linked")
-        elif linked != library.get("sha256") or consumer.get("linked_the_packaged_bytes") is not True:
-            problems.append("the consumer linked other bytes than the packaged library "
-                            f"(linked {linked[:12]}, packaged {str(library.get('sha256'))[:12]})")
+        problems.extend(link_proof_problems(consumer, library))
         if consumer.get("references_library") is not True:
             problems.append("the consumer does not load the library")
         if ARCH_ALIASES.get(str(consumer.get("arch")), consumer.get("arch")) != ARCH_ALIASES.get(arch, arch):
             problems.append(f"the consumer is {consumer.get('arch')!r}, the cell is {arch!r}")
+    identity = receipt.get("runtime_identity")
+    if not isinstance(identity, dict) or identity.get("status") not in RUNTIME_STATUSES:
+        problems.append(f"runtime_identity = {identity!r}")
+    else:
+        expected = runtime_identity(consumer)
+        if identity.get("status") != expected["status"]:
+            problems.append(f"runtime_identity says {identity.get('status')!r}, but the consumer link "
+                            f"supports {expected['status']!r}")
+        if identity.get("status") == "not_run" and not str(identity.get("reason", "")).strip():
+            problems.append("runtime_identity is not_run without a reason")
     if archive is not None:
         if (receipt.get("archive") or {}).get("sha256") != sha256_file(archive):
             problems.append("receipt archive sha256 does not match the archive")
@@ -552,12 +749,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--container-image", default="")
     parser.add_argument("--consumer", type=Path, help="a validator that linked against this library")
-    parser.add_argument("--consumer-library", type=Path, help="the library file the consumer linked")
-    parser.add_argument("--consumer-ran", action="store_true", help="the consumer ran and passed")
+    parser.add_argument("--consumer-ran", action="store_true",
+                        help="the consumer ran and passed (tests only; jobs pass --consumer-ran-evidence)")
     parser.add_argument("--consumer-ran-evidence", type=Path,
                         help="a file the consumer's run wrote after it passed, holding the consumer's sha256; "
                              "the consumer counts as run only if it names this binary")
     parser.add_argument("--consumer-note", default="")
+    parser.add_argument("--require-link-proof", action="store_true",
+                        help="the consumer's loader entry must resolve to the packaged bytes; "
+                             "without this a cell whose loader cannot be followed is recorded linked_unverified")
     parser.add_argument("--content-addressed-dir", type=Path)
     parser.add_argument("--check", action="store_true",
                         help="validate an existing receipt against --archive instead of writing one")
@@ -585,8 +785,9 @@ def main(argv: list[str] | None = None) -> int:
     receipt = build_receipt(args.archive, args.platform, args.arch, args.cell, args.out_dir,
                             args.source_root, container_image=args.container_image,
                             consumer=args.consumer, consumer_ran=args.consumer_ran,
-                            consumer_note=args.consumer_note, consumer_library=args.consumer_library,
-                            consumer_ran_evidence=args.consumer_ran_evidence)
+                            consumer_note=args.consumer_note,
+                            consumer_ran_evidence=args.consumer_ran_evidence,
+                            require_link_proof=args.require_link_proof)
     data = canonical_bytes(receipt)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)
@@ -599,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
             args.archive.name, FAMILY[args.platform], data)
         target.write_bytes(data)
         print(f"toolchain-receipt: content-addressed copy {target}")
-    summary = {key: receipt[key] for key in ("compiler", "platform_sdk", "consumer_link")}
+    summary = {key: receipt[key] for key in ("compiler", "platform_sdk", "consumer_link", "runtime_identity")}
     summary["compiler"] = {side: summary["compiler"][side] for side in ("c", "cxx")}
     print(json.dumps(summary, indent=1)[:4000])
     return 1 if problems else 0
