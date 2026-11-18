@@ -46,10 +46,11 @@ A shared library (`libv8.dylib` / `libv8.so` / `v8.dll`) that:
 
 ## Status
 
-Each cell below is proven end-to-end: **build → seal (0 ICU/zlib/Abseil exports) →
-identity check** (the library initializes V8, evaluates JS, and reports its own version —
-no skip-pass), and on the CMake harness a **forced-collision coexistence link** against a
-real Skia build.
+Every cell is **built, sealed (0 ICU/zlib/Abseil exports, a hard gate) and released**. Not
+every cell has its **runtime identity** checked (a validator that loads the packaged library,
+initializes V8, evaluates JS and checks the version) in the release build. The release
+notes and `release-metadata.json` say which cells did, read from each cell's toolchain
+receipt, and label the others **runtime-unverified**.
 
 | Platform | Intel (x64) | ARM (arm64) |
 |----------|-------------|-------------|
@@ -57,17 +58,29 @@ real Skia build.
 | Linux    | ✅ released  | ✅ released  |
 | Windows  | ✅ released  | ✅ released  |
 | Android  | —           | ✅ released  |
-| iOS      | —           | ✅ proven ¹  |
+| iOS      | —           | ✅ released ¹ |
 
-All six desktop cells ship in the [latest release](../../releases/latest), built fresh and
-**single-SHA gated** in one sweep (no mixed-revision release), each validated for coexistence
-against the paired Skia. Android (`arm64-v8a`) ships sealed + identity-checked on a real
-emulator.
+What each cell's release build proves at run time:
+
+| Cell | Runtime identity in the release build | Coexistence check |
+|------|----------------------------------------|-------------------|
+| mac-arm64, mac-x86_64, linux-x64 | runs, when the paired Skia release is reachable; otherwise runtime-unverified | forced-collision link against the paired Skia |
+| win-x64 | runs | seal audit (the validator stubs Skia) |
+| win-arm64 | runtime-unverified: the validator is cross-built on x64 and does not run | seal audit |
+| android-arm64 | runs only when an arm64 device or emulator is attached; otherwise runtime-unverified | seal and `DT_NEEDED` audits |
+| linux-arm64 | runtime-unverified: no consumer links in this job | seal audit |
+| ios-simulator-arm64 | runtime-unverified: the Simulator ODR gate runs outside the release workflow | Mach-O seal audit |
+
+A cell counts as run only when its validator's passing run left a marker naming that binary,
+and only when the receipt shows the validator's loader resolves to the packaged library's bytes.
+The cross-built validators ride along in the uploaded CI artifact (`validate/`) so a native
+host can run them afterwards; that run is not part of the release.
 
 ¹ **iOS** is jitless (lite mode) and ships as a `V8.framework` rather than a plain library —
-the **simulator-arm64** slice is proven (the sealed framework prevents the V8↔Dawn Abseil ODR
-on iOS: gate showed 725 collision partners resident, V8 init + eval, no abort) and is the one
-in the release; the **device-arm64** slice builds with your Apple signing identity. The two
+the **simulator-arm64** slice is the one in the release. Its Simulator ODR gate
+(`validate/ios/run_ios_gate.py`; the sealed framework prevents the V8↔Dawn Abseil ODR on iOS:
+725 collision partners resident, V8 init + eval, no abort) passed when the lane was
+developed and is not re-run by the release workflow; the **device-arm64** slice builds with your Apple signing identity. The two
 mobile "—" cells aren't targets: Android is arm64-only (`arm64-v8a`), and the Intel iOS
 simulator is deferred (all-Apple-silicon fleet).
 
@@ -141,13 +154,49 @@ part of the public header/ABI contract and can change between V8 revisions.
 A multi-platform release is **single-SHA gated**: every artifact must name the same V8
 revision, or the release is rejected — so a downloaded set is never mixed-revision.
 
+### Provenance
+
+Each archive is packed in its own build job, reproducibly (sorted members, fixed
+timestamps and modes; `tools/package_cell.py`), and published with three records named
+after it and their own sha256. None of them changes the archive's bytes.
+
+| Asset | What it proves | Written by |
+|---|---|---|
+| `<archive>.legal-manifest.sha256-<digest>.json` | Every object the library's link consumed, traced through ninja's graph to its sources and to the nearest license file of each, with the license texts. Headers and `libc++.lib` members are matched by digest. Toolchain headers are listed separately with their digests. | `tools/write_legal_manifest.py` |
+| `<archive>.<apple\|linux\|android\|windows>-toolchain.sha256-<digest>.json` | The compiler, linker and post-link tools (path, sha256, version), the SDK, `args.gn`, the library's load-time facts read from the archive (machine, needed libraries, minimum OS, glibc floor), the consumer link the cell's job performed (its loader entry for the library, where that resolves and whether those are the packaged bytes: `linked_packaged_bytes` or `linked_unverified`), and `runtime_identity`: `ran`, or `not_run` with the reason. | `tools/write_toolchain_receipt.py` |
+| `<archive>.provenance-attestation.sha256-<digest>.sigstore.json` | A GitHub build-provenance attestation over every archive, record and `release-metadata.json`: which workflow, ref and commit produced them. | `actions/attest-build-provenance` in the `attest` job |
+
+Each build job proves its two records with `--check` (the archive digest, every zip
+member, no unresolved license gap, the library's architecture, OS and linker) and fails
+if either does not hold. The `attest` job, which runs no V8 code and is the only job with
+an OIDC grant, proves them again before signing, and fails unless the set holds exactly
+the cells the dispatch's `platforms` selected, so a skipped cell cannot read as green. `release-metadata.json` maps each
+archive to its records under `provenance` and to its receipt's runtime identity under
+`runtime_identity`.
+
+To verify an archive:
+
+```bash
+gh attestation verify v8-mac-arm64-<id>.zip --repo danielraffel/v8-builder
+python3 tools/write_legal_manifest.py <archive>.legal-manifest.sha256-<digest>.json --archive v8-mac-arm64-<id>.zip --check
+python3 tools/write_toolchain_receipt.py <archive>.apple-toolchain.sha256-<digest>.json --archive v8-mac-arm64-<id>.zip --check
+```
+
+A release cut before these records existed can be re-cut with them: dispatch
+`build-v8.yml` from `main` with `platforms=all`, `skip_release=false` and
+`release_tag=v8-<id>-attested.<n>`. The run takes the V8 revision, the pair lock and the
+Skia validation release from `v8-<id>`'s `release-metadata.json` and publishes a new
+release; `v8-<id>` is never touched. V8 builds are not byte-reproducible, so the re-cut's
+archives have new digests and consumers repin to them.
+
 ## Automatic releases
 
 A scheduled workflow ([`release-watch.yml`](.github/workflows/release-watch.yml)) polls
 Chromium LKGR weekly, extracts the **Skia/V8/Dawn tuple** from Chromium's `DEPS`, compares
 that tuple to the latest published release manifest, and dispatches the full all-platform
 sweep only when one of those three SHAs changed. Scheduled tuple changes **publish
-automatically** (`skip_release=false`): build → seal → identity/coexistence validation →
+automatically** (`skip_release=false`): build → seal → identity/coexistence validation where
+the cell has it →
 single-SHA gate → GitHub Release.
 
 Milestone-matched releases are a second, independent lane. After skia-builder publishes
@@ -176,7 +225,8 @@ partially uploaded release is refused the same way for the assets already presen
 A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` and
 `replace_reason`. `replace_assets` is a comma-separated list of exact asset file names,
 or `ALL:<count>` for a full re-version, where the count must equal the number of assets
-the run publishes (8 zips plus `release-metadata.json`, so `ALL:9`); a wrong or missing
+the run publishes (8 zips, each with its three provenance records, plus
+`release-metadata.json`, so `ALL:33`); a wrong or missing
 count is refused, and every authorized name is printed. Only the named assets may change; the
 guard prints both digests, proves the new ones landed, and appends old and new sha256,
 the reason, the run, and the commit to an "Asset replacements" section in the release
