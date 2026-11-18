@@ -439,7 +439,9 @@ class BuildGraph:
 # ------------------------------------------------------------- manifest ----
 
 def build_manifest(archive: Path, graph: BuildGraph, library: str,
-                   platform: str = "", arch: str = "") -> dict[str, object]:
+                   platform: str = "", arch: str = "", member: str = "") -> dict[str, object]:
+    """``library`` is the link output in the out dir; ``member`` the archive
+    member that ships it (by default, the member whose file name is ``library``)."""
     graph.index()
     objects, link_inputs = graph.linked(library)
     if not objects:
@@ -485,7 +487,7 @@ def build_manifest(archive: Path, graph: BuildGraph, library: str,
                 else:
                     row["kind"] = "unresolved"
                     row["licenses"] = []
-            elif base == library or name == "V8.framework/V8":
+            elif name == member if member else base == library:
                 row["kind"] = "linked-library"
                 row["origin"] = f"generated:{library}"
                 built = os.path.join(graph.out_dir, library)
@@ -526,7 +528,9 @@ def build_manifest(archive: Path, graph: BuildGraph, library: str,
         "schema": SCHEMA,
         "license_resolution": LICENSE_RESOLUTION,
         "archive": {"name": archive.name, "sha256": sha256_file(archive)},
-        "target": {"platform": platform, "arch": arch, "library": library},
+        "target": {"platform": platform, "arch": arch, "library": library,
+                   "member": member or next((row["name"] for row in zip_members
+                                             if row["kind"] == "linked-library"), "")},
         "repositories": dict(sorted(graph.repositories.items())),
         "zip_members": zip_members,
         "linked_objects": dict(sorted(object_rows.items())),
@@ -576,6 +580,11 @@ def validate_manifest(manifest: dict, archive: Path | None = None) -> list[str]:
     members = manifest.get("zip_members") or []
     if not any(row.get("kind") == "linked-library" for row in members):
         problems.append("no zip member is the linked library")
+    member = str((manifest.get("target") or {}).get("member", ""))
+    if not member:
+        problems.append("target.member names no library member")
+    elif not any(row.get("name") == member and row.get("kind") == "linked-library" for row in members):
+        problems.append(f"target.member {member!r} is not the linked-library zip member")
     for row in members:
         if not row.get("licenses"):
             problems.append(f"member {row.get('name')} has no license")
@@ -617,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--out-dir", type=Path, help="the GN out dir the cell was built in")
     parser.add_argument("--library", help="the link output in --out-dir (libv8.dylib, v8.dll, ...)")
+    parser.add_argument("--member", default="",
+                        help="the archive member that ships --library (V8.framework/V8, lib/v8.dll, ...)")
     parser.add_argument("--platform", default="")
     parser.add_argument("--arch", default="")
     parser.add_argument("--builder-root", type=Path, default=Path(__file__).resolve().parent.parent)
@@ -648,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
     if not ninja:
         parser.error("no ninja binary found; pass --ninja")
     graph = BuildGraph(args.source_root, args.out_dir, ninja, builder_root=args.builder_root)
-    manifest = build_manifest(args.archive, graph, args.library, args.platform, args.arch)
+    manifest = build_manifest(args.archive, graph, args.library, args.platform, args.arch, args.member)
     data = canonical_bytes(manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)

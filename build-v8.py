@@ -1292,6 +1292,10 @@ class V8Build:
             # Android lays the .so out the idiomatic way (jniLibs/<abi>/libv8.so) and ships
             # no lib/ duplicate; iOS ships the framework; the rest ship lib/<name>.
             "lib": self._manifest_lib_path(sealed, arch),
+            # The file the GN link wrote in the out dir that "lib" ships (on iOS the
+            # framework binary is a renamed libv8.dylib). The provenance records walk
+            # the build graph from it.
+            "link_output": self.LIBNAME[self.args.platform],
             # Exact public compile contract emitted by V8's generated GN config. Consumers
             # must apply every entry; feature defines can change public class layout/API.
             "consumer_defines": self._external_config_defines(out),

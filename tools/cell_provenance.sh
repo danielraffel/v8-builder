@@ -30,18 +30,21 @@ case "$mode" in
     archive="package/v8-$cell-$rid.zip"
     python3 tools/package_cell.py "build/$cell" "$archive" || exit 1
     case "$platform" in
-      mac|ios) lib=libv8.dylib ;;
-      linux|android) lib=libv8.so ;;
-      win) lib=v8.dll ;;
+      mac|ios|linux|android|win) ;;
       *) echo "::error::unknown platform $platform"; exit 1 ;;
     esac
+    # The shipped member and the link output it was copied from, as the cell's
+    # manifest.json names them (V8.framework/V8 and libv8.dylib on iOS).
+    paths="$(python3 tools/cell_library.py "build/$cell/manifest.json")" || exit 1
+    member="${paths%%$'\t'*}"
+    lib="${paths#*$'\t'}"
     # The consumer link a cell's own job performs, if any. A receipt without
     # one says why.
     consumer=()
     case "$cell" in
       mac-*|linux-x64)
         if [ -f validate/build/v8_skia_validate ]; then
-          consumer=(--consumer validate/build/v8_skia_validate --consumer-library "build/$cell/lib/$lib"
+          consumer=(--consumer validate/build/v8_skia_validate --consumer-library "build/$cell/$member"
                     --consumer-ran --consumer-note "the Skia coexistence validator (forced-collision link and V8 identity) linked the packaged library and ran in this job")
         else
           consumer=(--consumer-note "the Skia coexistence validator did not build in this job (no skia-builder asset was reachable); the seal audit and the glibc floor gate are the checks")
@@ -70,7 +73,7 @@ case "$mode" in
       --out-dir "$out" --source-root "$v8" ${image[@]+"${image[@]}"} "${consumer[@]}" \
       --content-addressed-dir package || status=1
     python3 tools/write_legal_manifest.py provenance/legal-manifest.json \
-      --archive "$archive" --source-root "$v8" --out-dir "$out" --library "$lib" \
+      --archive "$archive" --source-root "$v8" --out-dir "$out" --library "$lib" --member "$member" \
       --platform "$platform" --arch "$arch" --content-addressed-dir package || status=1
     if [ -n "${GITHUB_ENV:-}" ]; then
       echo "provenance_status=$status" >> "$GITHUB_ENV"

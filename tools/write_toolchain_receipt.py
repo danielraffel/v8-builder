@@ -286,14 +286,17 @@ def post_link_tools(platform: str, source_root: Path, probe: Probe) -> dict[str,
     return {"strip": {"path": "none", "version": "none", "args": "not stripped (debug info is in the unshipped PDB)"}}
 
 
-def consumer_row(consumer: Path | None, ran: bool, note: str, library_name: str,
+def consumer_row(consumer: Path | None, ran: bool, note: str, library_member: str,
                  library_sha256: str, linked_library: Path | None) -> dict[str, object]:
     if consumer is None:
         return {"status": "none", "reason": note}
     data = consumer.read_bytes()
     facts = binfacts.binary_facts(data)
     needed = [str(item) for item in facts.get("needed", [])]
-    wanted = {"V8": "V8.framework/V8"}.get(library_name, library_name).lower()
+    parts = PurePosixPath(library_member).parts
+    # A framework binary is loaded as <Name>.framework/<Name>, anything else by its file name.
+    framework = len(parts) >= 2 and parts[-2] == parts[-1] + ".framework"
+    wanted = ("/".join(parts[-2:]) if framework else parts[-1]).lower()
     row: dict[str, object] = {
         "status": "linked-and-ran" if ran else "linked",
         "binary": consumer.name,
@@ -353,7 +356,7 @@ def build_receipt(archive: Path, platform: str, arch: str, cell: str, out_dir: P
         "ccache": {"version": (probe.out(["ccache", "--version"]).splitlines() or ["none"])[0]
                    if probe.which("ccache") else "none",
                    "cc_wrapper": "ccache" if "cc_wrapper" in args_text else "none"},
-        "consumer_link": consumer_row(consumer, consumer_ran, consumer_note, PurePosixPath(member).name,
+        "consumer_link": consumer_row(consumer, consumer_ran, consumer_note, member,
                                       member_sha, consumer_library),
     }
     return receipt

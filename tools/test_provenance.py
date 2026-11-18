@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import binfacts  # noqa: E402
+import cell_library  # noqa: E402
 import package_cell  # noqa: E402
 import release_naming  # noqa: E402
 import write_legal_manifest as legal  # noqa: E402
@@ -299,6 +300,42 @@ def test_legal_manifest_is_exhaustive_and_checks_its_archive():
         stray_manifest = legal.build_manifest(stray, tree.graph(), "libv8.dylib", "mac", "arm64")
         assert {"kind": "member-unresolved", "path": "lib/README"} in stray_manifest["gaps"]
         expect_failure(legal.validate_manifest(stray_manifest, stray), "unresolved gap")
+
+
+def test_cell_library_comes_from_the_manifest():
+    assert cell_library.library_paths({"lib": "V8.framework/V8"}) == ("V8.framework/V8", "libv8.dylib")
+    assert cell_library.library_paths({"lib": "V8.framework/V8", "link_output": "libv8.dylib"}) \
+        == ("V8.framework/V8", "libv8.dylib")
+    assert cell_library.library_paths({"lib": "jniLibs/arm64-v8a/libv8.so"}) \
+        == ("jniLibs/arm64-v8a/libv8.so", "libv8.so")
+    assert cell_library.library_paths({"lib": "lib/v8.dll"}) == ("lib/v8.dll", "v8.dll")
+    for bad in ({}, {"lib": ""}, {"lib": "V8.framework/"}):
+        try:
+            cell_library.library_paths(bad)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+
+
+def test_legal_manifest_resolves_the_ios_framework_member():
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = FakeTree(Path(tmp))
+        archive = write_zip(Path(tmp) / "v8-ios-simulator-arm64-x.zip", {
+            "V8.framework/V8": b"stripped", "V8.framework/Headers/v8.h": b"// header\n",
+            "manifest.json": b'{"lib": "V8.framework/V8"}\n'})
+        member, library = cell_library.library_paths({"lib": "V8.framework/V8"})
+        manifest = legal.build_manifest(archive, tree.graph(), library, "ios", "arm64", member)
+        rows = {row["name"]: row for row in manifest["zip_members"]}
+        assert rows["V8.framework/V8"]["kind"] == "linked-library"
+        assert manifest["target"]["member"] == "V8.framework/V8"
+        assert not any("linked library" in p or "target.member" in p
+                       for p in legal.validate_manifest(manifest, archive))
+        # Control: a member the manifest does not name is not the library.
+        unnamed = legal.build_manifest(archive, tree.graph(), library, "ios", "arm64")
+        expect_failure(legal.validate_manifest(unnamed, archive), "no zip member is the linked library")
+        manifest["target"]["member"] = "V8.framework/Headers/v8.h"
+        expect_failure(legal.validate_manifest(manifest, archive), "is not the linked-library zip member")
 
 
 def test_legal_manifest_reports_an_unlicensed_source():
