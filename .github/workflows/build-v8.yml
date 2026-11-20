@@ -44,16 +44,6 @@ on:
         required: false
         default: false
         type: boolean
-      replace_assets:
-        description: 'Deliberate rebuild of an existing release only: comma-separated asset file names whose published bytes may be replaced, or ALL:<count> where count is the number of assets this release publishes (8 zips, each with a legal manifest, a toolchain receipt and an attestation bundle, plus release-metadata.json = 33). Empty refuses any change to published bytes.'
-        required: false
-        default: ''
-        type: string
-      replace_reason:
-        description: 'Required with replace_assets: why the published bytes are wrong. Recorded with the old and new sha256 in the release notes.'
-        required: false
-        default: ''
-        type: string
       release_tag:
         description: 'Attested re-cut only: v8-<id>-attested.<n>. Rebuilds the V8 revision, pair and Skia validation release recorded in v8-<id> and publishes them as a new release; it never touches v8-<id>. Empty publishes under v8-<id>.'
         required: false
@@ -91,7 +81,6 @@ jobs:
           SKIP_RELEASE: ${{ inputs.skip_release }}
           PLATFORMS: ${{ inputs.platforms }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          REPLACE_ASSETS: ${{ inputs.replace_assets }}
           V8_VERSION: ${{ inputs.v8_version }}
           V8_REVISION: ${{ inputs.v8_revision }}
           LKGR_LOCK_B64: ${{ inputs.lkgr_lock_b64 }}
@@ -121,10 +110,6 @@ jobs:
           fi
           if [ "$PLATFORMS" != "all" ] && [ "$SKIP_RELEASE" != "true" ]; then
             echo "::error::an attested re-cut publishes every platform; set platforms=all"
-            exit 1
-          fi
-          if [ -n "$REPLACE_ASSETS" ]; then
-            echo "::error::an attested re-cut is a new release; replace_assets does not apply"
             exit 1
           fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -769,24 +754,18 @@ jobs:
       # Consumers pin every asset by sha256 (Pulp's tools/deps/manifest.json),
       # so re-running a version must not replace published bytes in place.
       # tools/release_asset_guard.py skips identical assets, uploads new ones,
-      # and refuses changed ones unless replace_assets names them and
-      # replace_reason says why; a deliberate replacement prints both digests
-      # and records them in the release notes.
+      # and refuses changed ones. Corrected bytes require a new tag or asset
+      # name, with consumer pins updated in the same change.
       - name: Create / update GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.pkg.outputs.tag }}
           TITLE: ${{ needs.attest.outputs.title }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          REPLACE_ASSETS: ${{ inputs.replace_assets }}
-          REPLACE_REASON: ${{ inputs.replace_reason }}
           REPIN_HINT: >-
-            Pulp: in tools/deps/manifest.json, set the V8 determinism entry for
-            /releases/download/{tag}/{asset} (a release_assets url, or
-            release_metadata_sha256 for release-metadata.json) from the published sha256
-            {old} to {new}. Before repinning, confirm the digest with
-            gh api repos/danielraffel/v8-builder/releases/tags/{tag} --jq '.assets[] | select(.name == "{asset}") | .digest'
-            and read the replacement entry in that release's notes.
+            Pulp: publish {asset} under a new release tag or asset name, then
+            update its tools/deps/manifest.json pin to the new URL and sha256
+            {new} in the same change.
         shell: bash
         run: |
           set -euo pipefail
@@ -804,16 +783,10 @@ jobs:
             fi
             title="$title, attested re-cut ${tag##*-attested.}"
           fi
-          # replace_assets (names, or ALL:<count>) and replace_reason are
-          # validated by the guard itself; see tools/release_asset_guard.py.
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
               publish "${assets[@]}" \
-              --replace-assets "$REPLACE_ASSETS" --reason "$REPLACE_REASON" \
               --repin-hint "$REPIN_HINT"
-            # Regenerated notes keep the record of any deliberate replacement.
-            python3 tools/release_asset_guard.py --repo "${{ github.repository }}" --tag "$tag" \
-              carry-ledger release/RELEASE_NOTES.md
             gh release edit "$tag" --repo "${{ github.repository }}" --notes-file release/RELEASE_NOTES.md
           else
             gh release create "$tag" --repo "${{ github.repository }}" \

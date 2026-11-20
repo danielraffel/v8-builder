@@ -222,15 +222,9 @@ consumer repin steps. V8 builds are not byte-reproducible, so a re-run of an exi
 complete version is refused rather than silently swapped; a retry that completes a
 partially uploaded release is refused the same way for the assets already present.
 
-A deliberate rebuild re-dispatches `build-v8.yml` with `replace_assets` and
-`replace_reason`. `replace_assets` is a comma-separated list of exact asset file names,
-or `ALL:<count>` for a full re-version, where the count must equal the number of assets
-the run publishes (8 zips, each with its three provenance records, plus
-`release-metadata.json`, so `ALL:33`); a wrong or missing
-count is refused, and every authorized name is printed. Only the named assets may change; the
-guard prints both digests, proves the new ones landed, and appends old and new sha256,
-the reason, the run, and the commit to an "Asset replacements" section in the release
-notes. Repin consumers in the same change.
+Publish a corrected build under a new release tag or a new asset name, and update
+consumer URLs and sha256 pins in the same change. For an attested full rebuild,
+dispatch `build-v8.yml` with a fresh `v8-<id>-attested.<n>` `release_tag`.
 
 Each matched V8 release links to its exact [Skia/Dawn release](https://github.com/danielraffel/skia-builder/releases),
 and the Skia release links back to the matching V8 milestone. Treat them as one tested
