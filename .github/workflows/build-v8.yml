@@ -72,7 +72,7 @@ jobs:
       lkgr_lock_b64: ${{ steps.r.outputs.lkgr_lock_b64 }}
       skia_release_tag: ${{ steps.r.outputs.skia_release_tag }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: r
@@ -229,13 +229,13 @@ jobs:
           echo "go=$GO" >> "$GITHUB_OUTPUT"
           echo "selected $ID -> go=$GO"
       - if: steps.sel.outputs.go == 'true'
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python (GitHub-hosted only; self-hosted uses system python3)
         # actions/setup-python needs the hosted-runner tool cache, which the self-hosted
         # Mac Studio runners don't provide — they already have a system python3. Skip it
         # there and let build-v8.py use `python3` directly.
         if: steps.sel.outputs.go == 'true' && runner.environment == 'github-hosted'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: '3.x' }
       - name: Free disk space (Linux)
         if: steps.sel.outputs.go == 'true' && runner.os == 'Linux'
@@ -295,7 +295,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Restore ccache (compiled objects — re-runs recompile only changed TUs)
         if: steps.sel.outputs.go == 'true'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-${{ github.run_id }}
@@ -494,10 +494,10 @@ jobs:
         if: steps.sel.outputs.go == 'true'
         run: ldd --version | head -1
       - if: steps.sel.outputs.go == 'true'
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Restore ccache
         if: steps.sel.outputs.go == 'true'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-portable-linux-x64-${{ needs.resolve-release.outputs.v8_revision || needs.resolve-release.outputs.v8_version || 'synced' }}-${{ github.run_id }}
@@ -642,8 +642,8 @@ jobs:
     needs: [build-v8, portable-linux-x64]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { path: artifacts, pattern: 'v8-*' }
       - name: Single-SHA gate (no mixed-revision release)
         run: python3 tools/check_single_sha.py artifacts
@@ -667,10 +667,10 @@ jobs:
       release_id: ${{ steps.assemble.outputs.release_id }}
       title: ${{ steps.assemble.outputs.title }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pkg-v8-*
           path: release
@@ -703,7 +703,7 @@ jobs:
           cat release/RELEASE_NOTES.md
       - name: Attest archives, provenance records and release metadata
         id: attest
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: subjects.sha256
       # The Sigstore bundle lets a consumer verify offline. Each archive gets a
@@ -733,10 +733,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-set
           path: release
